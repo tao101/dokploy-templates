@@ -18,13 +18,12 @@
 #   - Docker log rotation on all services
 #   - shm_size set on db for shared_buffers
 
-name: supabase
+name: supabase-prod-test-1
 
 # ═══════════════════════════════════════════════════════════════════
 # Inline config files — embedded so the compose is fully standalone
 # ═══════════════════════════════════════════════════════════════════
 configs:
-
   kong_config:
     content: |
       _format_version: '2.1'
@@ -791,7 +790,6 @@ configs:
       end
 
 services:
-
   studio:
     container_name: ${CONTAINER_PREFIX}-studio
     image: supabase/studio:2026.01.27-sha-6aa59ff
@@ -804,7 +802,7 @@ services:
           "CMD",
           "node",
           "-e",
-          "fetch('http://studio:3000/api/platform/profile').then((r) => {if (r.status !== 200) throw new Error(r.status)})"
+          "fetch('http://studio:3000/api/platform/profile').then((r) => {if (r.status !== 200) throw new Error(r.status)})",
         ]
       timeout: 10s
       interval: 5s
@@ -866,12 +864,7 @@ services:
       - default
       - dokploy-network
     healthcheck:
-      test:
-        [
-          "CMD",
-          "kong",
-          "health"
-        ]
+      test: ["CMD", "kong", "health"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -913,7 +906,7 @@ services:
           "--no-verbose",
           "--tries=1",
           "--spider",
-          "http://localhost:9999/health"
+          "http://localhost:9999/health",
         ]
       timeout: 5s
       interval: 5s
@@ -993,10 +986,7 @@ services:
       PGRST_APP_SETTINGS_JWT_EXP: ${JWT_EXPIRY}
       PGRST_DB_POOL: ${PGRST_DB_POOL:-15}
       PGRST_DB_POOL_ACQUISITION_TIMEOUT: ${PGRST_DB_POOL_TIMEOUT:-10}
-    command:
-      [
-        "postgrest"
-      ]
+    command: ["postgrest"]
     logging:
       driver: json-file
       options:
@@ -1025,7 +1015,7 @@ services:
           "/dev/null",
           "-H",
           "Authorization: Bearer ${ANON_KEY}",
-          "http://localhost:4000/api/tenants/realtime-dev/health"
+          "http://localhost:4000/api/tenants/realtime-dev/health",
         ]
       timeout: 5s
       interval: 5s
@@ -1037,7 +1027,7 @@ services:
       DB_USER: supabase_admin
       DB_PASSWORD: ${POSTGRES_PASSWORD}
       DB_NAME: ${POSTGRES_DB}
-      DB_AFTER_CONNECT_QUERY: 'SET search_path TO _realtime'
+      DB_AFTER_CONNECT_QUERY: "SET search_path TO _realtime"
       DB_ENC_KEY: ${REALTIME_DB_ENC_KEY}
       API_JWT_SECRET: ${JWT_SECRET}
       SECRET_KEY_BASE: ${SECRET_KEY_BASE}
@@ -1075,7 +1065,7 @@ services:
           "--no-verbose",
           "--tries=1",
           "--spider",
-          "http://storage:5000/status"
+          "http://storage:5000/status",
         ]
       timeout: 5s
       interval: 5s
@@ -1117,12 +1107,7 @@ services:
     volumes:
       - ../files/volumes/storage:/var/lib/storage:z
     healthcheck:
-      test:
-        [
-          "CMD",
-          "imgproxy",
-          "health"
-        ]
+      test: ["CMD", "imgproxy", "health"]
       timeout: 5s
       interval: 5s
       retries: 3
@@ -1171,12 +1156,7 @@ services:
     expose:
       - 4000
     healthcheck:
-      test:
-        [
-          "CMD",
-          "curl",
-          "http://localhost:4000/health"
-        ]
+      test: ["CMD", "curl", "http://localhost:4000/health"]
       timeout: 5s
       interval: 5s
       retries: 10
@@ -1236,18 +1216,10 @@ services:
     volumes:
       # PGDATA directory is persisted between restarts
       - ../files/volumes/db/data:/var/lib/postgresql/data:Z
-      # Bind mount for pgsodium decryption key (visible in Dokploy file management)
-      - ../files/volumes/db/config:/etc/postgresql-custom:Z
+      # Use named volume to persist pgsodium decryption key between restarts
+      - db-config:/etc/postgresql-custom
     healthcheck:
-      test:
-        [
-        "CMD",
-        "pg_isready",
-        "-U",
-        "postgres",
-        "-h",
-        "localhost"
-        ]
+      test: ["CMD", "pg_isready", "-U", "postgres", "-h", "localhost"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -1264,36 +1236,56 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
       JWT_SECRET: ${JWT_SECRET}
       JWT_EXP: ${JWT_EXPIRY}
-    command:
-      [
+    command: [
         "postgres",
-        "-c", "config_file=/etc/postgresql/postgresql.conf",
-        "-c", "log_min_messages=fatal",
+        "-c",
+        "config_file=/etc/postgresql/postgresql.conf",
+        "-c",
+        "log_min_messages=fatal",
         # ── Memory ──
-        "-c", "shared_buffers=${PG_SHARED_BUFFERS:-6GB}",
-        "-c", "effective_cache_size=${PG_EFFECTIVE_CACHE_SIZE:-18GB}",
-        "-c", "work_mem=${PG_WORK_MEM:-16MB}",
-        "-c", "maintenance_work_mem=${PG_MAINTENANCE_WORK_MEM:-1536MB}",
-        "-c", "autovacuum_work_mem=${PG_AUTOVACUUM_WORK_MEM:-256MB}",
+        "-c",
+        "shared_buffers=${PG_SHARED_BUFFERS:-6GB}",
+        "-c",
+        "effective_cache_size=${PG_EFFECTIVE_CACHE_SIZE:-18GB}",
+        "-c",
+        "work_mem=${PG_WORK_MEM:-16MB}",
+        "-c",
+        "maintenance_work_mem=${PG_MAINTENANCE_WORK_MEM:-1536MB}",
+        "-c",
+        "autovacuum_work_mem=${PG_AUTOVACUUM_WORK_MEM:-256MB}",
         # ── WAL & Checkpoints ──
-        "-c", "wal_buffers=${PG_WAL_BUFFERS:-16MB}",
-        "-c", "checkpoint_completion_target=${PG_CHECKPOINT_COMPLETION:-0.9}",
-        "-c", "min_wal_size=${PG_MIN_WAL_SIZE:-2GB}",
-        "-c", "max_wal_size=${PG_MAX_WAL_SIZE:-8GB}",
+        "-c",
+        "wal_buffers=${PG_WAL_BUFFERS:-16MB}",
+        "-c",
+        "checkpoint_completion_target=${PG_CHECKPOINT_COMPLETION:-0.9}",
+        "-c",
+        "min_wal_size=${PG_MIN_WAL_SIZE:-2GB}",
+        "-c",
+        "max_wal_size=${PG_MAX_WAL_SIZE:-8GB}",
         # ── NVMe SSD Optimization ──
-        "-c", "random_page_cost=${PG_RANDOM_PAGE_COST:-1.1}",
-        "-c", "effective_io_concurrency=${PG_EFFECTIVE_IO_CONCURRENCY:-200}",
-        "-c", "maintenance_io_concurrency=${PG_MAINTENANCE_IO_CONCURRENCY:-200}",
+        "-c",
+        "random_page_cost=${PG_RANDOM_PAGE_COST:-1.1}",
+        "-c",
+        "effective_io_concurrency=${PG_EFFECTIVE_IO_CONCURRENCY:-200}",
+        "-c",
+        "maintenance_io_concurrency=${PG_MAINTENANCE_IO_CONCURRENCY:-200}",
         # ── Connections ──
-        "-c", "max_connections=${PG_MAX_CONNECTIONS:-200}",
+        "-c",
+        "max_connections=${PG_MAX_CONNECTIONS:-200}",
         # ── Parallelism (tuned for 8 vCPU) ──
-        "-c", "max_worker_processes=${PG_MAX_WORKER_PROCESSES:-8}",
-        "-c", "max_parallel_workers=${PG_MAX_PARALLEL_WORKERS:-8}",
-        "-c", "max_parallel_workers_per_gather=${PG_MAX_PARALLEL_WORKERS_PER_GATHER:-4}",
-        "-c", "max_parallel_maintenance_workers=${PG_MAX_PARALLEL_MAINTENANCE_WORKERS:-4}",
+        "-c",
+        "max_worker_processes=${PG_MAX_WORKER_PROCESSES:-8}",
+        "-c",
+        "max_parallel_workers=${PG_MAX_PARALLEL_WORKERS:-8}",
+        "-c",
+        "max_parallel_workers_per_gather=${PG_MAX_PARALLEL_WORKERS_PER_GATHER:-4}",
+        "-c",
+        "max_parallel_maintenance_workers=${PG_MAX_PARALLEL_MAINTENANCE_WORKERS:-4}",
         # ── Misc ──
-        "-c", "huge_pages=${PG_HUGE_PAGES:-try}",
-        "-c", "default_statistics_target=${PG_DEFAULT_STATISTICS_TARGET:-100}"
+        "-c",
+        "huge_pages=${PG_HUGE_PAGES:-try}",
+        "-c",
+        "default_statistics_target=${PG_DEFAULT_STATISTICS_TARGET:-100}",
       ]
     logging:
       driver: json-file
@@ -1318,18 +1310,14 @@ services:
           "--no-verbose",
           "--tries=1",
           "--spider",
-          "http://vector:9001/health"
+          "http://vector:9001/health",
         ]
       timeout: 5s
       interval: 5s
       retries: 3
     environment:
       LOGFLARE_PUBLIC_ACCESS_TOKEN: ${LOGFLARE_PUBLIC_ACCESS_TOKEN}
-    command:
-      [
-        "--config",
-        "/etc/vector/vector.yml"
-      ]
+    command: ["--config", "/etc/vector/vector.yml"]
     security_opt:
       - "label=disable"
     logging:
@@ -1361,7 +1349,7 @@ services:
           "--head",
           "-o",
           "/dev/null",
-          "http://127.0.0.1:4000/api/health"
+          "http://127.0.0.1:4000/api/health",
         ]
       interval: 10s
       timeout: 5s
@@ -1393,13 +1381,16 @@ services:
       [
         "/bin/sh",
         "-c",
-        "/app/bin/migrate && /app/bin/supavisor eval \"$$(cat /etc/pooler/pooler.exs)\" && /app/bin/server"
+        '/app/bin/migrate && /app/bin/supavisor eval "$$(cat /etc/pooler/pooler.exs)" && /app/bin/server',
       ]
     logging:
       driver: json-file
       options:
         max-size: ${LOG_MAX_SIZE:-10m}
         max-file: ${LOG_MAX_FILE:-3}
+
+volumes:
+  db-config:
 
 networks:
   dokploy-network:
