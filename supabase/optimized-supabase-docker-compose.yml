@@ -487,6 +487,11 @@ configs:
             headers:
               x-api-key: $${LOGFLARE_PUBLIC_ACCESS_TOKEN?LOGFLARE_PUBLIC_ACCESS_TOKEN is required}
           uri: 'http://analytics:4000/api/logs?source_name=cloudflare.logs.prod'
+        logflare_unmatched:
+          type: 'blackhole'
+          inputs:
+            - router._unmatched
+          print_interval_secs: 0
 
   db_supabase_sql:
     content: |
@@ -768,12 +773,15 @@ configs:
         "auth_query" => "SELECT * FROM pgbouncer.get_auth($$1)",
         "default_max_clients" => System.get_env("POOLER_MAX_CLIENT_CONN"),
         "default_pool_size" => System.get_env("POOLER_DEFAULT_POOL_SIZE"),
+        "client_idle_timeout" => String.to_integer(System.get_env("POOLER_CLIENT_IDLE_TIMEOUT", "0")),
+        "client_heartbeat_interval" => String.to_integer(System.get_env("POOLER_CLIENT_HEARTBEAT_INTERVAL", "60")),
         "default_parameter_status" => %{"server_version" => version},
         "users" => [%{
           "db_user" => "pgbouncer",
           "db_password" => System.get_env("POSTGRES_PASSWORD"),
           "mode_type" => System.get_env("POOLER_POOL_MODE"),
           "pool_size" => System.get_env("POOLER_DEFAULT_POOL_SIZE"),
+          "pool_checkout_timeout" => String.to_integer(System.get_env("POOLER_POOL_CHECKOUT_TIMEOUT", "60000")),
           "is_manager" => true
         }]
       }
@@ -823,6 +831,7 @@ services:
       AUTH_JWT_SECRET: ${JWT_SECRET}
       PG_META_CRYPTO_KEY: ${PG_META_CRYPTO_KEY}
 
+      LOGFLARE_API_KEY: ${LOGFLARE_PUBLIC_ACCESS_TOKEN}
       LOGFLARE_PUBLIC_ACCESS_TOKEN: ${LOGFLARE_PUBLIC_ACCESS_TOKEN}
       LOGFLARE_PRIVATE_ACCESS_TOKEN: ${LOGFLARE_PRIVATE_ACCESS_TOKEN}
       LOGFLARE_URL: http://analytics:4000
@@ -843,6 +852,10 @@ services:
     container_name: ${CONTAINER_PREFIX}-kong
     image: kong:2.8.1
     restart: unless-stopped
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
     # ports:
     #   - ${KONG_HTTP_PORT}:8000/tcp
     #   - ${KONG_HTTPS_PORT}:8443/tcp
@@ -1032,6 +1045,7 @@ services:
       DNS_NODES: "''"
       RLIMIT_NOFILE: "10000"
       APP_NAME: realtime
+      REGION: us-east-1
       SEED_SELF_HOST: true
       RUN_JANITOR: true
       # Realtime scaling
@@ -1116,7 +1130,7 @@ services:
       IMGPROXY_BIND: ":5001"
       IMGPROXY_LOCAL_FILESYSTEM_ROOT: /
       IMGPROXY_USE_ETAG: "true"
-      IMGPROXY_ENABLE_WEBP_DETECTION: ${IMGPROXY_ENABLE_WEBP_DETECTION}
+      IMGPROXY_AUTO_WEBP: ${IMGPROXY_AUTO_WEBP}
       IMGPROXY_MAX_SRC_RESOLUTION: "16.8"
     logging:
       driver: json-file
@@ -1222,8 +1236,8 @@ services:
     volumes:
       # PGDATA directory is persisted between restarts
       - ../files/volumes/db/data:/var/lib/postgresql/data:Z
-      # Use named volume to persist pgsodium decryption key between restarts
-      - db-config:/etc/postgresql-custom
+      # Bind mount for pgsodium decryption key (visible in Dokploy file management)
+      - ../files/volumes/db/config:/etc/postgresql-custom:Z
     healthcheck:
       test:
         [
@@ -1369,7 +1383,7 @@ services:
       API_JWT_SECRET: ${JWT_SECRET}
       METRICS_JWT_SECRET: ${JWT_SECRET}
       REGION: local
-      ERL_AFLAGS: -proto_dist inet_tcp
+      ERL_AFLAGS: -proto_dist inet_tcp +K true +SDio 8 +sbwt none +sbwtdcpu none +sbwtdio none
       POOLER_TENANT_ID: ${POOLER_TENANT_ID}
       POOLER_DEFAULT_POOL_SIZE: ${POOLER_DEFAULT_POOL_SIZE}
       POOLER_MAX_CLIENT_CONN: ${POOLER_MAX_CLIENT_CONN}
@@ -1386,9 +1400,6 @@ services:
       options:
         max-size: ${LOG_MAX_SIZE:-10m}
         max-file: ${LOG_MAX_FILE:-3}
-
-volumes:
-  db-config:
 
 networks:
   dokploy-network:

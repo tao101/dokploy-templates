@@ -9,7 +9,7 @@ Standalone Docker Compose templates for deploying Supabase on [Dokploy](https://
 | `supabase-docker-compose.yml` | Standard Supabase deployment. Works on any server. |
 | `supabase.env` | Environment variables for the standard deployment. |
 | `optimized-supabase-docker-compose.yml` | Production-optimized for Hetzner CCX33 (8 vCPU, 32GB RAM, NVMe SSD). Adds PostgreSQL tuning, `shm_size`, Docker log rotation, explicit service pool sizes. |
-| `optimized-supabase.env` | Environment variables for the optimized deployment. Includes PG tuning params, Supavisor pool sizing for 800 connections, Realtime scaling, and service connection budgets. |
+| `optimized-supabase.env` | Environment variables for the optimized deployment. Includes PG tuning params, Supavisor pool sizing for 2000 connections, Realtime scaling, and service connection budgets. |
 | `kernel-tuning-notes.md` | Optional host-level kernel tuning (sysctl, hugepages, swap). Includes a full post-deployment verification checklist. |
 
 **Which variant to use:**
@@ -41,9 +41,9 @@ Additional env vars to review:
 |----------|---------|---------|
 | `PG_SHARED_BUFFERS` | `6GB` | PostgreSQL shared memory (25% of RAM) |
 | `PG_EFFECTIVE_CACHE_SIZE` | `18GB` | Planner hint for OS cache (75% of RAM) |
-| `PG_MAX_CONNECTIONS` | `200` | Max direct PG connections |
-| `POOLER_DEFAULT_POOL_SIZE` | `60` | Backend connections per Supavisor tenant |
-| `POOLER_MAX_CLIENT_CONN` | `800` | Max client connections through Supavisor |
+| `PG_MAX_CONNECTIONS` | `500` | Max direct PG connections |
+| `POOLER_DEFAULT_POOL_SIZE` | `300` | Backend connections per Supavisor tenant |
+| `POOLER_MAX_CLIENT_CONN` | `2000` | Max client connections through Supavisor |
 | `RT_MAX_CONCURRENT_USERS` | `1000` | Realtime concurrent user ceiling |
 | `PGRST_DB_POOL` | `15` | PostgREST connection pool |
 | `GOTRUE_DB_POOL` | `15` | GoTrue (Auth) connection pool |
@@ -219,16 +219,16 @@ Client App (Prisma, Supabase JS, etc.)
                      (for migrations only)
 ```
 
-### Connection Budget (Optimized, max_connections=200)
+### Connection Budget (Optimized, max_connections=500)
 
 | Consumer | Connections |
 |----------|-------------|
-| Supavisor pool | ~60 |
+| Supavisor pool | ~300 |
 | PostgREST | ~15 |
 | GoTrue (Auth) | ~15 |
 | Realtime | 10-30 |
 | Other services | 10-30 |
-| **Headroom** | **30-80** |
+| **Headroom** | **~110** |
 
 ### Port Mapping
 

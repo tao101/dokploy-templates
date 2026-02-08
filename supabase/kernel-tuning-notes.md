@@ -19,6 +19,14 @@ sysctl -w net.core.somaxconn=65535
 # Increase file descriptor limits
 sysctl -w fs.file-max=2097152
 
+# TCP keepalive — detect dead connections faster (for Supavisor + Prisma)
+sysctl -w net.ipv4.tcp_keepalive_time=60      # Start keepalive after 60s idle (default: 7200)
+sysctl -w net.ipv4.tcp_keepalive_intvl=10      # Retry every 10s (default: 75)
+sysctl -w net.ipv4.tcp_keepalive_probes=6      # Give up after 6 probes (default: 9)
+
+# Connection reuse — recycle TIME_WAIT sockets faster under high churn
+sysctl -w net.ipv4.tcp_tw_reuse=1
+
 # Huge pages for PostgreSQL shared_buffers (6GB / 2MB per page = 3072 pages)
 # Only useful if PG_HUGE_PAGES=on (currently set to 'try')
 sysctl -w vm.nr_hugepages=3072
@@ -31,6 +39,10 @@ vm.swappiness=1
 vm.overcommit_memory=1
 net.core.somaxconn=65535
 fs.file-max=2097152
+net.ipv4.tcp_keepalive_time=60
+net.ipv4.tcp_keepalive_intvl=10
+net.ipv4.tcp_keepalive_probes=6
+net.ipv4.tcp_tw_reuse=1
 vm.nr_hugepages=3072
 ```
 
@@ -83,13 +95,13 @@ psql "postgresql://postgres:YOUR_PASSWORD@SERVER_IP:5435/postgres" -c "
 "
 ```
 
-Expected budget (max_connections=200):
-- Supavisor pool: ~60
+Expected budget (max_connections=500):
+- Supavisor pool: ~300
 - PostgREST: ~15
 - GoTrue: ~15
 - Realtime: 10-30
 - Other services: 10-30
-- Headroom: 30-80
+- Headroom: ~110
 
 ### 4. Verify Supavisor pooler is accepting connections
 
