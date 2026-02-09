@@ -1,0 +1,567 @@
+# Trigger.dev Webapp for Dokploy (Distributed Setup)
+# ===================================================
+# Standalone template: paste this compose + env file into Dokploy and deploy.
+# All configurations are self-contained — no external file mounts needed.
+#
+# Services: trigger (web app), postgres, redis, electric, clickhouse,
+#           registry, minio, postgres-backup, redis-backup
+#
+# Domain Setup (after deploy):
+#   1. In Dokploy UI, add domain for trigger service -> port 3000 (HTTPS)
+#   2. In Dokploy UI, add domain for registry service -> port 5000 (HTTPS)
+#   3. Set TRIGGER_DOMAIN and REGISTRY_DOMAIN env vars to match
+#   4. Redeploy
+#
+# Worker Token (one-time after first deploy):
+#   docker logs <trigger-container> | grep -A15 "Worker Token"
+#   Use this token in your worker's TRIGGER_WORKER_TOKEN env var.
+
+name: trigger-webapp
+
+services:
+  trigger:
+    image: 'ghcr.io/triggerdotdev/trigger.dev@sha256:b208b821aebeafe1e814618e92009e104bcb66d7b67d9aee580f5b12ce9391ca'
+    container_name: ${CONTAINER_PREFIX}-trigger
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      electric:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      registry:
+        condition: service_healthy
+    user: root
+    command: |
+      sh -c "chown -R node:node /home/node/shared && exec ./scripts/entrypoint.sh"
+    expose:
+      - "3000"
+    networks:
+      - default
+      - dokploy-network
+    environment:
+      # Clustering - enable multi-process mode for heavy worker polling
+      ENABLE_CLUSTER: 1
+      WEB_CONCURRENCY: 6
+      # Batch Queue - prevents stuck batches from leaked concurrency tokens
+      BATCH_QUEUE_SHARD_COUNT: 2
+      BATCH_CONCURRENCY_LIMIT_DEFAULT: 10
+      BATCH_QUEUE_CONSUMER_COUNT: 5
+      BATCH_QUEUE_CONSUMER_INTERVAL_MS: 100
+      # Run Engine - Scaled for heavy worker polling
+      RUN_ENGINE_WORKER_COUNT: 50
+      RUN_ENGINE_TASKS_PER_WORKER: 50
+      RUN_ENGINE_WORKER_CONCURRENCY_LIMIT: 50
+      RUN_ENGINE_WORKER_POLL_INTERVAL: 500
+      RUN_ENGINE_RATE_LIMIT_MAX: 10000
+      RUN_ENGINE_RATE_LIMIT_REFILL_RATE: 3000
+      API_RATE_LIMIT_MAX: 5000
+      API_RATE_LIMIT_REFILL_RATE: 2000
+      DATABASE_CONNECTION_LIMIT: 1500
+      DEFAULT_ENV_EXECUTION_CONCURRENCY_LIMIT: 1000
+      DEFAULT_ORG_EXECUTION_CONCURRENCY_LIMIT: 3000
+      WORKER_CONCURRENCY: 50
+      MAXIMUM_DEV_QUEUE_SIZE: 30000
+      MAXIMUM_DEPLOYED_QUEUE_SIZE: 150000
+      # Queue processing optimization (faster polling for heavy worker load)
+      MASTER_QUEUE_CONSUMERS_INTERVAL_MS: 250
+      MASTER_QUEUE_CONSUMER_DEQUEUE_COUNT: 50
+      MARQS_SHARED_WORKER_QUEUE_CONSUMER_INTERVAL_MS: 100
+      MARQS_SHARED_WORKER_QUEUE_MAX_MESSAGE_COUNT: 50
+      PROCESS_WORKER_QUEUE_DEBOUNCE_MS: 500
+      REMIX_APP_PORT: 3000
+      # Domain-based URLs (set TRIGGER_DOMAIN in env)
+      APP_ORIGIN: 'https://${TRIGGER_DOMAIN}'
+      LOGIN_ORIGIN: 'https://${TRIGGER_DOMAIN}'
+      API_ORIGIN: 'https://${TRIGGER_DOMAIN}'
+      SESSION_SECRET: '${SESSION_SECRET}'
+      MAGIC_LINK_SECRET: '${MAGIC_LINK_SECRET}'
+      ENCRYPTION_KEY: '${ENCRYPTION_KEY}'
+      MANAGED_WORKER_SECRET: '${MANAGED_WORKER_SECRET}'
+      DATABASE_URL: 'postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-trigger}?schema=public&sslmode=disable'
+      DIRECT_URL: 'postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-trigger}?schema=public&sslmode=disable'
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_TLS_DISABLED: true
+      ELECTRIC_ORIGIN: 'http://electric:3000'
+      DEV_OTEL_EXPORTER_OTLP_ENDPOINT: 'https://${TRIGGER_DOMAIN}/otel'
+      DEPLOY_REGISTRY_HOST: '${REGISTRY_DOMAIN}'
+      DEPLOY_REGISTRY_NAMESPACE: '${REGISTRY_NAMESPACE:-trigger}'
+      DEPLOY_REGISTRY_USERNAME: '${REGISTRY_USERNAME:-trigger}'
+      DEPLOY_REGISTRY_PASSWORD: '${REGISTRY_PASSWORD}'
+      OBJECT_STORE_BASE_URL: 'http://minio:9000'
+      OBJECT_STORE_ACCESS_KEY_ID: '${MINIO_ROOT_USER:-admin}'
+      OBJECT_STORE_SECRET_ACCESS_KEY: '${MINIO_PASSWORD}'
+      GRACEFUL_SHUTDOWN_TIMEOUT: 30000
+      NODE_MAX_OLD_SPACE_SIZE: '${NODE_MAX_OLD_SPACE_SIZE:-16384}'
+      # Bootstrap is ENABLED - workers will get their token from this webapp
+      TRIGGER_BOOTSTRAP_ENABLED: 1
+      TRIGGER_BOOTSTRAP_WORKER_GROUP_NAME: bootstrap
+      TRIGGER_BOOTSTRAP_WORKER_TOKEN_PATH: /home/node/shared/worker_token
+      CLICKHOUSE_URL: 'http://${CLICKHOUSE_ADMIN_USER:-default}:${CLICKHOUSE_PASSWORD}@clickhouse:8123?secure=false'
+      CLICKHOUSE_LOG_LEVEL: info
+      INTERNAL_OTEL_TRACE_LOGGING_ENABLED: 0
+      RUN_REPLICATION_ENABLED: 1
+      RUN_REPLICATION_CLICKHOUSE_URL: 'http://${CLICKHOUSE_ADMIN_USER:-default}:${CLICKHOUSE_PASSWORD}@clickhouse:8123'
+      RUN_REPLICATION_LOG_LEVEL: info
+      APP_LOG_LEVEL: info
+      TRIGGER_TELEMETRY_DISABLED: 0
+      # Email configuration for login/magic links (optional)
+      WHITELISTED_EMAILS: '${WHITELISTED_EMAILS:-}'
+      EMAIL_TRANSPORT: '${EMAIL_TRANSPORT:-}'
+      FROM_EMAIL: '${FROM_EMAIL:-}'
+      RESEND_API_KEY: '${RESEND_API_KEY:-}'
+      # Alert email configuration (reuses login email settings)
+      ALERT_EMAIL_TRANSPORT: '${EMAIL_TRANSPORT:-}'
+      ALERT_FROM_EMAIL: '${FROM_EMAIL:-}'
+      ALERT_RESEND_API_KEY: '${RESEND_API_KEY:-}'
+      # Slack integration (required for Slack alerts)
+      ORG_SLACK_INTEGRATION_CLIENT_ID: '${ORG_SLACK_INTEGRATION_CLIENT_ID:-}'
+      ORG_SLACK_INTEGRATION_CLIENT_SECRET: '${ORG_SLACK_INTEGRATION_CLIENT_SECRET:-}'
+      # Admin auto-promotion (regex pattern)
+      ADMIN_EMAILS: '${ADMIN_EMAILS:-}'
+    volumes:
+      - 'shared-data:/home/node/shared'
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - '-e'
+        - "require('http').get('http://127.0.0.1:3000/healthcheck',(r)=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  postgres:
+    image: postgres:14
+    container_name: ${CONTAINER_PREFIX}-postgres
+    restart: unless-stopped
+    command:
+      - -c
+      - wal_level=logical
+      - -c
+      - max_connections=${PG_MAX_CONNECTIONS:-1500}
+      # Memory settings - Optimized for 8 vCPU / 32GB RAM
+      - -c
+      - shared_buffers=${PG_SHARED_BUFFERS:-8GB}
+      - -c
+      - effective_cache_size=${PG_EFFECTIVE_CACHE_SIZE:-24GB}
+      - -c
+      # Increased for better sorting of 70+ task result sets
+      - work_mem=${PG_WORK_MEM:-256MB}
+      - -c
+      - maintenance_work_mem=${PG_MAINTENANCE_WORK_MEM:-1GB}
+      - -c
+      - checkpoint_completion_target=0.9
+      # NVMe optimizations (Hetzner Cloud)
+      - -c
+      - random_page_cost=1.1
+      - -c
+      - effective_io_concurrency=200
+      - -c
+      - wal_buffers=64MB
+      - -c
+      - min_wal_size=1GB
+      - -c
+      - max_wal_size=4GB
+      - -c
+      - checkpoint_timeout=15min
+      - -c
+      - default_statistics_target=100
+      - -c
+      - huge_pages=try
+      - -c
+      - max_parallel_workers_per_gather=4
+      - -c
+      - max_worker_processes=8
+      - -c
+      - statement_timeout=30000
+    environment:
+      POSTGRES_USER: 'postgres'
+      POSTGRES_PASSWORD: '${POSTGRES_PASSWORD}'
+      POSTGRES_DB: '${POSTGRES_DB:-trigger}'
+    volumes:
+      - 'postgres-data:/var/lib/postgresql/data'
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 5s
+      timeout: 20s
+      retries: 10
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  redis:
+    image: 'redis:7'
+    container_name: ${CONTAINER_PREFIX}-redis
+    restart: unless-stopped
+    # Optimized for 8 vCPU / 32GB RAM - doubled resources for heavy worker polling
+    command: >-
+      redis-server
+      --maxmemory ${REDIS_MAXMEMORY:-12gb}
+      --maxmemory-policy noeviction
+      --appendonly yes
+      --appendfsync everysec
+      --tcp-keepalive 300
+      --tcp-backlog 511
+      --timeout 0
+      --io-threads ${REDIS_IO_THREADS:-6}
+      --io-threads-do-reads yes
+    volumes:
+      - 'redis-data:/data'
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  electric:
+    image: 'electricsql/electric:1.2.9'
+    container_name: ${CONTAINER_PREFIX}-electric
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    environment:
+      DATABASE_URL: 'postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-trigger}?schema=public&sslmode=disable'
+      ELECTRIC_SECRET: '${ELECTRIC_SECRET}'
+      ELECTRIC_USAGE_REPORTING: 'false'
+      # Scaled pool size for heavy worker polling (8 vCPU / 32GB RAM)
+      ELECTRIC_DB_POOL_SIZE: 600
+      # Extended cache settings to reduce shape churn and DB pressure
+      ELECTRIC_CACHE_MAX_AGE: 120
+      ELECTRIC_CACHE_STALE_AGE: 1200
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/v1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  clickhouse:
+    image: 'clickhouse/clickhouse-server:25.8'
+    container_name: ${CONTAINER_PREFIX}-clickhouse
+    restart: unless-stopped
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    environment:
+      CLICKHOUSE_USER: ${CLICKHOUSE_ADMIN_USER:-default}
+      CLICKHOUSE_PASSWORD: '${CLICKHOUSE_PASSWORD}'
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    # Inline config creation - Optimized for 8 vCPU / 32GB RAM
+    command:
+      - /bin/bash
+      - -c
+      - |
+        # Server settings (config.d) - NO profiles here
+        cat > /etc/clickhouse-server/config.d/custom.xml << 'EOF'
+        <clickhouse>
+            <!-- Replace default listen_host (removes ::) with IPv4 only -->
+            <listen_host replace="replace">0.0.0.0</listen_host>
+
+            <!-- Logging: reduce noise -->
+            <logger>
+                <level>warning</level>
+            </logger>
+
+            <!-- Memory settings - DOUBLED for 32GB RAM (heavy worker polling) -->
+            <mark_cache_size>10737418240</mark_cache_size> <!-- 10GB -->
+            <uncompressed_cache_size>17179869184</uncompressed_cache_size> <!-- 16GB -->
+            <max_server_memory_usage_to_ram_ratio>0.9</max_server_memory_usage_to_ram_ratio>
+
+            <!-- Concurrency settings - DOUBLED for 8 vCPU (heavy worker polling) -->
+            <max_concurrent_queries>300</max_concurrent_queries>
+            <concurrent_threads_soft_limit_num>8</concurrent_threads_soft_limit_num>
+            <background_pool_size>32</background_pool_size>
+            <background_schedule_pool_size>32</background_schedule_pool_size>
+
+            <merge_tree>
+                <max_bytes_to_merge_at_max_space_in_pool>161061273600</max_bytes_to_merge_at_max_space_in_pool>
+                <number_of_free_entries_in_pool_to_execute_mutation>20</number_of_free_entries_in_pool_to_execute_mutation>
+                <!-- Aggressive merging to reduce FINAL query work -->
+                <min_age_to_force_merge_seconds>3600</min_age_to_force_merge_seconds>
+                <min_age_to_force_merge_on_partition_only>1</min_age_to_force_merge_on_partition_only>
+            </merge_tree>
+
+            <!-- Reduce log flush frequency -->
+            <asynchronous_metric_log>
+                <flush_interval_milliseconds>60000</flush_interval_milliseconds>
+            </asynchronous_metric_log>
+            <metric_log>
+                <flush_interval_milliseconds>60000</flush_interval_milliseconds>
+            </metric_log>
+            <query_log>
+                <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+            </query_log>
+        </clickhouse>
+        EOF
+
+        # User/profile settings (users.d) - profiles MUST be here to take effect
+        cat > /etc/clickhouse-server/users.d/custom.xml << 'EOF'
+        <clickhouse>
+            <profiles>
+                <default>
+                    <max_threads>8</max_threads>
+                    <max_block_size>65536</max_block_size>
+                    <input_format_parallel_parsing>1</input_format_parallel_parsing>
+                    <output_format_parallel_formatting>1</output_format_parallel_formatting>
+                    <!-- FINAL query optimizations (7-30x faster for ReplacingMergeTree) -->
+                    <do_not_merge_across_partitions_select_final>1</do_not_merge_across_partitions_select_final>
+                    <max_final_threads>8</max_final_threads>
+                    <optimize_move_to_prewhere_if_final>1</optimize_move_to_prewhere_if_final>
+                </default>
+            </profiles>
+        </clickhouse>
+        EOF
+        exec /entrypoint.sh
+    volumes:
+      - 'clickhouse-data:/var/lib/clickhouse'
+      - 'clickhouse-logs:/var/log/clickhouse-server'
+    healthcheck:
+      test: ['CMD-SHELL', 'wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  registry:
+    image: 'registry:2'
+    container_name: ${CONTAINER_PREFIX}-registry
+    restart: unless-stopped
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        apk add --no-cache apache2-utils
+        mkdir -p /auth
+        htpasswd -Bbn "$${REGISTRY_USERNAME}" "$${REGISTRY_PASSWORD}" > /auth/htpasswd
+        exec /entrypoint.sh /etc/docker/registry/config.yml
+    expose:
+      - "5000"
+    networks:
+      - default
+      - dokploy-network
+    environment:
+      REGISTRY_USERNAME: ${REGISTRY_USERNAME:-trigger}
+      REGISTRY_PASSWORD: '${REGISTRY_PASSWORD}'
+      REGISTRY_AUTH: htpasswd
+      REGISTRY_AUTH_HTPASSWD_REALM: 'Registry Realm'
+      REGISTRY_AUTH_HTPASSWD_PATH: /auth/htpasswd
+      REGISTRY_HTTP_SECRET: '${REGISTRY_PASSWORD}'
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:5000/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  minio:
+    image: bitnamilegacy/minio:latest
+    container_name: ${CONTAINER_PREFIX}-minio
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-admin}
+      MINIO_ROOT_PASSWORD: '${MINIO_PASSWORD}'
+      MINIO_DEFAULT_BUCKETS: packets
+      MINIO_BROWSER: 'on'
+    volumes:
+      - 'minio-data:/bitnami/minio/data'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # ============================================
+  # BACKUP SERVICES (Optional - set BACKUP_ENABLED=true to enable)
+  # ============================================
+  postgres-backup:
+    image: itbm/postgresql-backup-s3:latest
+    container_name: ${CONTAINER_PREFIX}-postgres-backup
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      BACKUP_ENABLED: '${BACKUP_ENABLED:-false}'
+      POSTGRES_HOST: postgres
+      POSTGRES_DATABASE: '${POSTGRES_DB:-trigger}'
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: '${POSTGRES_PASSWORD}'
+      S3_ENDPOINT: '${BACKUP_S3_ENDPOINT:-}'
+      S3_BUCKET: '${BACKUP_S3_BUCKET:-}'
+      S3_ACCESS_KEY_ID: '${BACKUP_S3_ACCESS_KEY_ID:-}'
+      S3_SECRET_ACCESS_KEY: '${BACKUP_S3_SECRET_ACCESS_KEY:-}'
+      S3_REGION: '${BACKUP_S3_REGION:-us-east-1}'
+      S3_PREFIX: '${BACKUP_S3_PREFIX:-trigger}/postgres'
+      SCHEDULE: '${BACKUP_POSTGRES_SCHEDULE:-0 2 * * *}'
+      DELETE_OLDER_THAN: '${BACKUP_POSTGRES_KEEP_DAYS:-60} days ago'
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        if [ "$${BACKUP_ENABLED}" != "true" ]; then
+          echo "Backups disabled (BACKUP_ENABLED != true). Sleeping indefinitely..."
+          tail -f /dev/null
+        fi
+        exec sh run.sh
+    healthcheck:
+      test: ["CMD-SHELL", "true"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  redis-backup:
+    image: alpine:3.19
+    container_name: ${CONTAINER_PREFIX}-redis-backup
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - 'redis-data:/data:ro'
+    environment:
+      BACKUP_ENABLED: '${BACKUP_ENABLED:-false}'
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      S3_ENDPOINT: '${BACKUP_S3_ENDPOINT:-}'
+      S3_BUCKET: '${BACKUP_S3_BUCKET:-}'
+      S3_ACCESS_KEY_ID: '${BACKUP_S3_ACCESS_KEY_ID:-}'
+      S3_SECRET_ACCESS_KEY: '${BACKUP_S3_SECRET_ACCESS_KEY:-}'
+      S3_REGION: '${BACKUP_S3_REGION:-us-east-1}'
+      S3_PREFIX: '${BACKUP_S3_PREFIX:-trigger}/redis'
+      BACKUP_SCHEDULE: '${BACKUP_REDIS_SCHEDULE:-0 3 * * *}'
+      BACKUP_KEEP_DAYS: '${BACKUP_REDIS_KEEP_DAYS:-60}'
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        if [ "$${BACKUP_ENABLED}" != "true" ]; then
+          echo "Backups disabled (BACKUP_ENABLED != true). Sleeping indefinitely..."
+          tail -f /dev/null
+        fi
+        apk add --no-cache aws-cli redis bash gzip
+        # Create backup script inline (self-contained, no external dependencies)
+        cat > /backup.sh << 'BACKUP_SCRIPT'
+        #!/bin/sh
+        set -e
+        TIMESTAMP=$$(date +%Y%m%d_%H%M%S)
+        BACKUP_FILE="redis_backup_$${TIMESTAMP}.rdb"
+        LOCAL_BACKUP_DIR="/tmp/redis-backups"
+        mkdir -p "$${LOCAL_BACKUP_DIR}"
+        echo "[$$(date)] Starting Redis backup..."
+        # Save initial LASTSAVE timestamp
+        INITIAL_LASTSAVE=$$(redis-cli -h "$${REDIS_HOST}" -p "$${REDIS_PORT}" LASTSAVE)
+        # Trigger BGSAVE
+        redis-cli -h "$${REDIS_HOST}" -p "$${REDIS_PORT}" BGSAVE
+        echo "[$$(date)] Waiting for BGSAVE to complete..."
+        # Wait for LASTSAVE to change (indicating BGSAVE completed)
+        while [ "$$(redis-cli -h "$${REDIS_HOST}" -p "$${REDIS_PORT}" LASTSAVE)" = "$$INITIAL_LASTSAVE" ]; do
+          sleep 1
+        done
+        sleep 2
+        # Copy and compress the RDB file
+        if [ -f /data/dump.rdb ]; then
+          cp /data/dump.rdb "$${LOCAL_BACKUP_DIR}/$${BACKUP_FILE}"
+          gzip "$${LOCAL_BACKUP_DIR}/$${BACKUP_FILE}"
+          BACKUP_FILE="$${BACKUP_FILE}.gz"
+          echo "[$$(date)] Backup compressed: $${BACKUP_FILE}"
+        else
+          echo "[$$(date)] ERROR: dump.rdb not found"
+          exit 1
+        fi
+        # Configure AWS CLI
+        export AWS_ACCESS_KEY_ID="$${S3_ACCESS_KEY_ID}"
+        export AWS_SECRET_ACCESS_KEY="$${S3_SECRET_ACCESS_KEY}"
+        export AWS_DEFAULT_REGION="$${S3_REGION:-us-east-1}"
+        S3_ENDPOINT_URL=""
+        if [ -n "$${S3_ENDPOINT:-}" ]; then
+          S3_ENDPOINT_URL="--endpoint-url $${S3_ENDPOINT}"
+        fi
+        # Upload to S3
+        S3_PATH="s3://$${S3_BUCKET}/$${S3_PREFIX}/$${BACKUP_FILE}"
+        echo "[$$(date)] Uploading to $${S3_PATH}..."
+        aws s3 cp $${S3_ENDPOINT_URL} "$${LOCAL_BACKUP_DIR}/$${BACKUP_FILE}" "$${S3_PATH}"
+        echo "[$$(date)] Upload complete!"
+        # Clean up old backups
+        if [ -n "$${BACKUP_KEEP_DAYS:-}" ] && [ "$${BACKUP_KEEP_DAYS}" -gt 0 ]; then
+          echo "[$$(date)] Cleaning up backups older than $${BACKUP_KEEP_DAYS} days..."
+          CUTOFF_DATE=$$(date -d "-$${BACKUP_KEEP_DAYS} days" +%Y%m%d 2>/dev/null || date -v-$${BACKUP_KEEP_DAYS}d +%Y%m%d)
+          aws s3 ls $${S3_ENDPOINT_URL} "s3://$${S3_BUCKET}/$${S3_PREFIX}/" | while read -r line; do
+            FILE_NAME=$$(echo "$$line" | awk '{print $$4}')
+            if [ -n "$$FILE_NAME" ]; then
+              FILE_DATE=$$(echo "$$FILE_NAME" | sed -n 's/redis_backup_\([0-9]\{8\}\)_.*/\1/p')
+              if [ -n "$$FILE_DATE" ] && [ "$$FILE_DATE" -lt "$$CUTOFF_DATE" ]; then
+                echo "[$$(date)] Deleting old backup: $${FILE_NAME}"
+                aws s3 rm $${S3_ENDPOINT_URL} "s3://$${S3_BUCKET}/$${S3_PREFIX}/$${FILE_NAME}"
+              fi
+            fi
+          done
+        fi
+        rm -f "$${LOCAL_BACKUP_DIR}/$${BACKUP_FILE}"
+        echo "[$$(date)] Redis backup completed successfully!"
+        BACKUP_SCRIPT
+        chmod +x /backup.sh
+        printf '%s /backup.sh\n' "$${BACKUP_SCHEDULE}" > /etc/crontabs/root
+        crond -f -l 2
+    healthcheck:
+      test: ["CMD-SHELL", "true"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  postgres-data:
+  redis-data:
+  clickhouse-data:
+  clickhouse-logs:
+  minio-data:
+  shared-data:
+
+networks:
+  dokploy-network:
+    external: true
