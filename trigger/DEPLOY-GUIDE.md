@@ -31,17 +31,11 @@ registry:5000 (HTTPS, public)           task containers (spawned)
 
 ## Step 1: Prepare the Webapp Server
 
-Run the server setup script on the **webapp server**:
-
-```bash
-sudo bash server-setup-webapp.sh
-```
-
-This configures:
+Follow the commands in **`server-setup-webapp.md`** on the webapp server. This configures:
 - Kernel parameters (Redis overcommit, swappiness, file descriptors, TCP tuning)
 - File descriptor limits (262144)
 - Disables swap
-- Optional: Huge pages for PostgreSQL (uncomment in script based on your server size)
+- Optional: Huge pages for PostgreSQL
 
 Verify output shows all expected values.
 
@@ -64,27 +58,15 @@ Copy the entire contents of `trigger-webapp-docker-compose.yml` into the compose
 2. Copy the contents of `trigger-webapp.env`
 3. Paste into the environment variables section
 
-### 2.4 Generate Secrets
+### 2.4 Secrets
 
-Before deploying, generate strong passwords for all `CHANGE_ME` values:
+The env file comes with pre-generated secrets. If you want to regenerate any, run:
 
 ```bash
-# Run this 9 times, once for each secret
 openssl rand -base64 32
 ```
 
-Replace these in the environment variables:
-- `POSTGRES_PASSWORD`
-- `SESSION_SECRET`
-- `MAGIC_LINK_SECRET`
-- `ENCRYPTION_KEY`
-- `MANAGED_WORKER_SECRET`
-- `REGISTRY_PASSWORD`
-- `MINIO_PASSWORD`
-- `ELECTRIC_SECRET`
-- `CLICKHOUSE_PASSWORD`
-
-**Important:** Save `MANAGED_WORKER_SECRET` and `REGISTRY_PASSWORD` - you'll need them for the worker.
+**Important:** `MANAGED_WORKER_SECRET` and `REGISTRY_PASSWORD` must match between webapp and worker env files. The provided files already have matching values.
 
 ### 2.5 Select Hardware Tier
 
@@ -160,26 +142,9 @@ Copy the `TRIGGER_WORKER_TOKEN` value (starts with `tr_wgt_`).
 
 If you don't see the worker token in the logs, you can also find it in the Trigger.dev dashboard under **Settings** -> **Workers**.
 
-## Step 5: Get Docker Network Name
+## Step 5: Prepare the Worker Server
 
-After the first deploy, find the compose network name:
-
-```bash
-docker network ls | grep trigger-webapp
-```
-
-The output will show something like `trigger-webapp_default`. Note this - you'll need it if webapp and worker are on the **same** server. For a **separate** worker server, see Step 7.
-
-## Step 6: Prepare the Worker Server
-
-Run the server setup script on the **worker server**:
-
-1. Edit `server-setup-worker.sh` and set `WEBAPP_IP` to your webapp server's IP address
-2. Run:
-
-```bash
-sudo bash server-setup-worker.sh
-```
+Follow the commands in **`server-setup-worker.md`** on the worker server. Replace `WEBAPP_IP` with your webapp server's actual IP address in the firewall commands.
 
 This configures:
 - Kernel parameters (swappiness, file descriptors, TCP tuning, ephemeral port range)
@@ -189,26 +154,26 @@ This configures:
 
 Verify output shows all expected values and firewall rules are applied.
 
-## Step 7: Deploy Worker on Dokploy
+## Step 6: Deploy Worker on Dokploy
 
-### 7.1 Create Compose Project
+### 6.1 Create Compose Project
 
 1. In Dokploy UI **on the worker server**, go to **Projects** -> **Create Project**
 2. Name it `trigger-worker`
 3. Inside the project, create a new **Compose** service
 4. Set **Source** to "Raw"
 
-### 7.2 Paste Compose File
+### 6.2 Paste Compose File
 
 Copy the entire contents of `trigger-worker-docker-compose.yml` into the compose editor.
 
-### 7.3 Configure Environment Variables
+### 6.3 Configure Environment Variables
 
 1. Go to the **Environment** tab
 2. Copy the contents of `trigger-worker.env`
 3. Paste into the environment variables section
 
-### 7.4 Set Required Values
+### 6.4 Set Required Values
 
 Update these values:
 
@@ -216,24 +181,11 @@ Update these values:
 |----------|-------|--------|
 | `TRIGGER_API_URL` | `https://trigger.yourdomain.com` | Your webapp domain from Step 3 |
 | `TRIGGER_WORKER_TOKEN` | `tr_wgt_xxxxx` | From Step 4 |
-| `MANAGED_WORKER_SECRET` | (the secret you generated) | Must match webapp's value |
 | `DOCKER_REGISTRY_URL` | `https://registry.yourdomain.com` | Your registry domain from Step 3 |
-| `REGISTRY_USERNAME` | `trigger` | Must match webapp's value |
-| `REGISTRY_PASSWORD` | (the password you generated) | Must match webapp's value |
 
-### 7.5 Set Docker Network Name
+**Note:** `MANAGED_WORKER_SECRET` and `REGISTRY_PASSWORD` are pre-filled and already match the webapp env file. `DOCKER_RUNNER_NETWORKS` is hardcoded to `dokploy-network` in the compose file — no configuration needed.
 
-After the first deploy of the worker compose, find its network:
-
-```bash
-docker network ls | grep trigger-worker
-```
-
-Set `DOCKER_RUNNER_NETWORKS` to the network name (e.g., `trigger-worker_default`). This is the network that spawned task containers will join.
-
-**Note:** You need to deploy once first to create the network, then set this value and redeploy.
-
-### 7.6 Deploy
+### 6.5 Deploy
 
 Click **Deploy**. Check the supervisor logs:
 
@@ -243,9 +195,9 @@ docker logs <trigger-worker-supervisor-container> 2>&1 | tail -50
 
 You should see it connect to the webapp and start polling for work.
 
-## Step 8: Verify Cross-Server Connectivity
+## Step 7: Verify Cross-Server Connectivity
 
-### 8.1 Worker -> Webapp (HTTPS)
+### 7.1 Worker -> Webapp (HTTPS)
 
 From the worker server, verify it can reach the webapp:
 
@@ -255,9 +207,9 @@ curl -s https://trigger.yourdomain.com/api/v1/health
 
 Should return a 200 response. This is the public HTTPS endpoint - no special firewall rules needed.
 
-### 8.2 Webapp -> Worker Supervisor (Port 8020)
+### 7.2 Webapp -> Worker Supervisor (Port 8020)
 
-The webapp needs to reach the supervisor's workload API on port 8020. The worker compose publishes this port to the host (`ports: ["8020:8020"]`), and the firewall rule from `server-setup-worker.sh` restricts access to the webapp IP only.
+The webapp needs to reach the supervisor's workload API on port 8020. The worker compose publishes this port to the host (`ports: ["8020:8020"]`), and the firewall rule from `server-setup-worker.md` restricts access to the webapp IP only.
 
 From the webapp server, verify connectivity:
 
@@ -266,11 +218,11 @@ curl -s http://<worker-server-ip>:8020/health
 ```
 
 Should return a 200 response. If it times out, check:
-- Firewall on worker server allows webapp IP on port 8020 (set in `server-setup-worker.sh`)
+- Firewall on worker server allows webapp IP on port 8020 (set in `server-setup-worker.md`)
 - The supervisor container is running and healthy
 - Port 8020 is published (verify with `docker port <supervisor-container>`)
 
-### 8.3 Worker -> Registry (HTTPS)
+### 7.3 Worker -> Registry (HTTPS)
 
 From the worker server, verify it can pull images:
 
@@ -280,7 +232,7 @@ curl -s https://registry.yourdomain.com/v2/
 
 Should return `{}`.
 
-### 8.4 Check Supervisor Logs
+### 7.4 Check Supervisor Logs
 
 The supervisor logs should show:
 
@@ -291,7 +243,7 @@ Polling for work...
 
 If you see connection errors, verify `TRIGGER_API_URL` and `TRIGGER_WORKER_TOKEN`.
 
-## Step 9: Optional Configuration
+## Step 8: Optional Configuration
 
 ### Email (Magic Link Login)
 
@@ -372,16 +324,6 @@ BACKUP_S3_REGION=us-east-1
 - Verify `REGISTRY_USERNAME` and `REGISTRY_PASSWORD` match webapp values
 - Test: `docker login registry.yourdomain.com -u trigger -p <password>`
 
-### DOCKER_RUNNER_NETWORKS not set
-
-**Symptom:** Supervisor logs show network errors when spawning task containers.
-
-**Fix:**
-1. Deploy the worker compose once
-2. Run: `docker network ls | grep trigger-worker`
-3. Set `DOCKER_RUNNER_NETWORKS` to the output (e.g., `trigger-worker_default`)
-4. Redeploy
-
 ### ClickHouse not starting
 
 **Symptom:** ClickHouse container exits or restarts repeatedly.
@@ -398,7 +340,7 @@ BACKUP_S3_REGION=us-east-1
 **Fix:**
 - Ensure you selected the correct tier for your server size
 - Check shared_buffers is set correctly: `docker exec <pg-container> psql -U postgres -c "SHOW shared_buffers;"`
-- If using huge pages, verify: `sysctl vm.nr_hugepages` (uncomment in server-setup-webapp.sh)
+- If using huge pages, verify: `sysctl vm.nr_hugepages` (uncomment in server-setup-webapp.md)
 - Monitor connections: `docker exec <pg-container> psql -U postgres -c "SELECT count(*) FROM pg_stat_activity;"`
 
 ### Redis warnings in logs
@@ -414,9 +356,9 @@ BACKUP_S3_REGION=us-east-1
 | File | Purpose |
 |------|---------|
 | `trigger-webapp-docker-compose.yml` | Webapp compose (trigger, postgres, redis, clickhouse, electric, minio, registry, backups) |
-| `trigger-webapp.env` | Webapp environment template with tiered hardware tuning |
+| `trigger-webapp.env` | Webapp environment with pre-generated secrets and tiered hardware tuning |
 | `trigger-worker-docker-compose.yml` | Worker compose (supervisor, docker-proxy) |
-| `trigger-worker.env` | Worker environment template with scaling settings |
-| `server-setup-webapp.sh` | Host kernel tuning for webapp server |
-| `server-setup-worker.sh` | Host kernel tuning + firewall for worker server |
+| `trigger-worker.env` | Worker environment with matching secrets and scaling settings |
+| `server-setup-webapp.md` | Host kernel tuning commands for webapp server |
+| `server-setup-worker.md` | Host kernel tuning + firewall commands for worker server |
 | `DEPLOY-GUIDE.md` | This guide |
