@@ -1,5 +1,7 @@
 # Kernel Tuning Notes for Hetzner CCX33 (Supabase Production)
 
+> **Run [`../SERVER-SETUP.md`](../SERVER-SETUP.md) first.** It covers all base kernel tuning (sysctl params, file descriptors, swap, Docker daemon tuning, firewall, NTP). This file covers Supabase-specific sysctl values and the post-deployment validation checklist.
+
 These are optional host-level optimizations. The optimized docker-compose works without them, but applying these can improve performance further.
 
 **All commands require sudo.**

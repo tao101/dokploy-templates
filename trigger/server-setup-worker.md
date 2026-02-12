@@ -1,5 +1,7 @@
 # Worker Server Setup
 
+> **Run [`../SERVER-SETUP.md`](../SERVER-SETUP.md) first.** It covers system updates, Dokploy install, Docker daemon tuning, kernel parameters, file descriptors, swap, firewall, and NTP. Then come back here for worker-specific tuning: ephemeral port range (`ip_local_port_range`) and port 8020 firewall rules.
+
 Run these commands on each worker server before deploying the worker compose. This server runs: supervisor, docker-proxy, and spawned task containers.
 
 All commands require `sudo`.

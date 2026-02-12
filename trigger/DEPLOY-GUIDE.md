@@ -31,11 +31,10 @@ registry:5000 (HTTPS, public)           task containers (spawned)
 
 ## Step 1: Prepare the Webapp Server
 
-Follow the commands in **`server-setup-webapp.md`** on the webapp server. This configures:
-- Kernel parameters (Redis overcommit, swappiness, file descriptors, TCP tuning)
-- File descriptor limits (262144)
-- Disables swap
-- Optional: Huge pages for PostgreSQL
+1. Run **[`../SERVER-SETUP.md`](../SERVER-SETUP.md)** first (system updates, Dokploy install, Docker daemon tuning, kernel params, file descriptors, swap, firewall, NTP).
+2. Then run **`server-setup-webapp.md`** on the webapp server for any remaining app-specific tuning.
+
+If you already ran `SERVER-SETUP.md`, all base kernel tuning is done — `server-setup-webapp.md` has no additional required steps beyond the shared guide.
 
 Verify output shows all expected values.
 
@@ -144,13 +143,10 @@ If you don't see the worker token in the logs, you can also find it in the Trigg
 
 ## Step 5: Prepare the Worker Server
 
-Follow the commands in **`server-setup-worker.md`** on the worker server. Replace `WEBAPP_IP` with your webapp server's actual IP address in the firewall commands.
+1. Run **[`../SERVER-SETUP.md`](../SERVER-SETUP.md)** first (system updates, Dokploy install, Docker daemon tuning, kernel params, file descriptors, swap, firewall, NTP).
+2. Then run **`server-setup-worker.md`** on the worker server for worker-specific tuning: ephemeral port range expansion (`ip_local_port_range`) and port 8020 firewall rules.
 
-This configures:
-- Kernel parameters (swappiness, file descriptors, TCP tuning, ephemeral port range)
-- File descriptor limits (262144)
-- Disables swap
-- Firewall: restricts port 8020 to webapp IP only
+Replace `WEBAPP_IP` with your webapp server's actual IP address in the firewall commands.
 
 Verify output shows all expected values and firewall rules are applied.
 

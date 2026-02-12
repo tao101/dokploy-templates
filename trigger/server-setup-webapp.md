@@ -1,5 +1,7 @@
 # Webapp Server Setup
 
+> **Run [`../SERVER-SETUP.md`](../SERVER-SETUP.md) first.** It covers system updates, Dokploy install, Docker daemon tuning, kernel parameters, file descriptors, swap, firewall, and NTP. If you already ran that guide, all base tuning below is already applied — no additional steps are needed for the webapp server.
+
 Run these commands on the server where the webapp compose will be deployed. This server runs: trigger, postgres, redis, clickhouse, electric, minio, registry, and backup services.
 
 All commands require `sudo`.

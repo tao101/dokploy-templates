@@ -323,7 +323,7 @@ ENABLE_EMAIL_AUTOCONFIRM=false   # Require email verification
 
 ### Kernel tuning (optimized variant, dedicated servers)
 
-For production on dedicated servers, apply host-level optimizations. See [`kernel-tuning-notes.md`](kernel-tuning-notes.md) for sysctl settings, huge pages, and swap configuration.
+For production on dedicated servers, run [`../SERVER-SETUP.md`](../SERVER-SETUP.md) first for base server tuning (kernel params, Docker daemon, swap, firewall, NTP). Then see [`kernel-tuning-notes.md`](kernel-tuning-notes.md) for Supabase-specific post-deployment validation (PostgreSQL settings, connection budget, Supavisor, Realtime tenant limits).
 
 ---
 
