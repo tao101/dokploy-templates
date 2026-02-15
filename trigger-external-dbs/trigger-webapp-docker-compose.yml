@@ -1,0 +1,199 @@
+# Trigger.dev Webapp for Dokploy Stack / Swarm (External Databases)
+# =================================================================
+# Deploy as Dokploy "Stack" type for Docker Swarm with replicas.
+# All configurations are self-contained — no external file mounts needed.
+#
+# Services: trigger (web app), registry
+# Databases are EXTERNAL — deploy trigger-dbs-docker-compose.yml FIRST.
+#
+# This compose connects to external DBs via dokploy-network aliases:
+#   trigger-postgres, trigger-redis, trigger-clickhouse,
+#   trigger-electric, trigger-minio
+#
+# Domain Setup (after deploy):
+#   1. In Dokploy UI, add domain for trigger service -> port 3000 (HTTPS)
+#   2. In Dokploy UI, add domain for registry service -> port 5000 (HTTPS)
+#   3. Set TRIGGER_DOMAIN and REGISTRY_DOMAIN env vars to match
+#   4. Redeploy
+#
+# Worker Token (one-time after first deploy):
+#   docker service logs <trigger-service> | grep -A15 "Worker Token"
+#   Use this token in your worker's TRIGGER_WORKER_TOKEN env var.
+#
+# IMPORTANT: Deploy with TRIGGER_REPLICAS=1 first, get worker token, then scale up.
+
+services:
+  trigger:
+    image: "ghcr.io/triggerdotdev/trigger.dev@sha256:b208b821aebeafe1e814618e92009e104bcb66d7b67d9aee580f5b12ce9391ca"
+    user: root
+    command: |
+      sh -c "chown -R node:node /home/node/shared && exec ./scripts/entrypoint.sh"
+    networks:
+      - default
+      - dokploy-network
+    deploy:
+      replicas: ${TRIGGER_REPLICAS:-2}
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 10
+        window: 120s
+      update_config:
+        parallelism: 1
+        delay: 30s
+        order: start-first
+      resources:
+        limits:
+          cpus: "${TRIGGER_CPUS:-6}"
+          memory: "${TRIGGER_MEMORY:-24G}"
+        reservations:
+          cpus: "${TRIGGER_CPUS_RESERVED:-2}"
+          memory: "${TRIGGER_MEMORY_RESERVED:-8G}"
+    environment:
+      # Clustering - enable multi-process mode (8 vCPU / 32GB RAM, no DBs on this server)
+      ENABLE_CLUSTER: 1
+      WEB_CONCURRENCY: 7
+      # Batch Queue - prevents stuck batches from leaked concurrency tokens
+      BATCH_QUEUE_SHARD_COUNT: 2
+      BATCH_CONCURRENCY_LIMIT_DEFAULT: 10
+      BATCH_QUEUE_CONSUMER_COUNT: 5
+      BATCH_QUEUE_CONSUMER_INTERVAL_MS: 100
+      # Run Engine - Scaled for heavy worker polling
+      RUN_ENGINE_WORKER_COUNT: 50
+      RUN_ENGINE_TASKS_PER_WORKER: 50
+      RUN_ENGINE_WORKER_CONCURRENCY_LIMIT: 50
+      RUN_ENGINE_WORKER_POLL_INTERVAL: 500
+      RUN_ENGINE_RATE_LIMIT_MAX: 10000
+      RUN_ENGINE_RATE_LIMIT_REFILL_RATE: 3000
+      API_RATE_LIMIT_MAX: 5000
+      API_RATE_LIMIT_REFILL_RATE: 2000
+      DATABASE_CONNECTION_LIMIT: 1500
+      DEFAULT_ENV_EXECUTION_CONCURRENCY_LIMIT: 1000
+      DEFAULT_ORG_EXECUTION_CONCURRENCY_LIMIT: 3000
+      WORKER_CONCURRENCY: 50
+      MAXIMUM_DEV_QUEUE_SIZE: 30000
+      MAXIMUM_DEPLOYED_QUEUE_SIZE: 150000
+      # Queue processing optimization (faster polling for heavy worker load)
+      MASTER_QUEUE_CONSUMERS_INTERVAL_MS: 250
+      MASTER_QUEUE_CONSUMER_DEQUEUE_COUNT: 50
+      MARQS_SHARED_WORKER_QUEUE_CONSUMER_INTERVAL_MS: 100
+      MARQS_SHARED_WORKER_QUEUE_MAX_MESSAGE_COUNT: 50
+      PROCESS_WORKER_QUEUE_DEBOUNCE_MS: 500
+      REMIX_APP_PORT: 3000
+      # Domain-based URLs (set TRIGGER_DOMAIN in env)
+      APP_ORIGIN: "https://${TRIGGER_DOMAIN}"
+      LOGIN_ORIGIN: "https://${TRIGGER_DOMAIN}"
+      API_ORIGIN: "https://${TRIGGER_DOMAIN}"
+      SESSION_SECRET: "${SESSION_SECRET}"
+      MAGIC_LINK_SECRET: "${MAGIC_LINK_SECRET}"
+      ENCRYPTION_KEY: "${ENCRYPTION_KEY}"
+      MANAGED_WORKER_SECRET: "${MANAGED_WORKER_SECRET}"
+      # External databases via dokploy-network aliases
+      DATABASE_URL: "postgresql://postgres:${POSTGRES_PASSWORD}@trigger-postgres:5432/${POSTGRES_DB:-trigger}?schema=public&sslmode=disable"
+      DIRECT_URL: "postgresql://postgres:${POSTGRES_PASSWORD}@trigger-postgres:5432/${POSTGRES_DB:-trigger}?schema=public&sslmode=disable"
+      REDIS_HOST: trigger-redis
+      REDIS_PORT: 6379
+      REDIS_TLS_DISABLED: true
+      ELECTRIC_ORIGIN: "http://trigger-electric:3000"
+      DEV_OTEL_EXPORTER_OTLP_ENDPOINT: "https://${TRIGGER_DOMAIN}/otel"
+      DEPLOY_REGISTRY_HOST: "${REGISTRY_DOMAIN}"
+      DEPLOY_REGISTRY_NAMESPACE: "${REGISTRY_NAMESPACE:-trigger}"
+      DEPLOY_REGISTRY_USERNAME: "${REGISTRY_USERNAME:-trigger}"
+      DEPLOY_REGISTRY_PASSWORD: "${REGISTRY_PASSWORD}"
+      OBJECT_STORE_BASE_URL: "http://trigger-minio:9000"
+      OBJECT_STORE_ACCESS_KEY_ID: "${MINIO_ROOT_USER:-admin}"
+      OBJECT_STORE_SECRET_ACCESS_KEY: "${MINIO_PASSWORD}"
+      GRACEFUL_SHUTDOWN_TIMEOUT: 30000
+      NODE_MAX_OLD_SPACE_SIZE: "${NODE_MAX_OLD_SPACE_SIZE:-24576}"
+      # Bootstrap is ENABLED - workers will get their token from this webapp
+      TRIGGER_BOOTSTRAP_ENABLED: 1
+      TRIGGER_BOOTSTRAP_WORKER_GROUP_NAME: bootstrap
+      TRIGGER_BOOTSTRAP_WORKER_TOKEN_PATH: /home/node/shared/worker_token
+      CLICKHOUSE_URL: "http://${CLICKHOUSE_ADMIN_USER:-default}:${CLICKHOUSE_PASSWORD}@trigger-clickhouse:8123?secure=false"
+      CLICKHOUSE_LOG_LEVEL: info
+      INTERNAL_OTEL_TRACE_LOGGING_ENABLED: 0
+      RUN_REPLICATION_ENABLED: 1
+      RUN_REPLICATION_CLICKHOUSE_URL: "http://${CLICKHOUSE_ADMIN_USER:-default}:${CLICKHOUSE_PASSWORD}@trigger-clickhouse:8123"
+      RUN_REPLICATION_LOG_LEVEL: info
+      APP_LOG_LEVEL: info
+      TRIGGER_TELEMETRY_DISABLED: 0
+      # Email configuration for login/magic links (optional)
+      WHITELISTED_EMAILS: "${WHITELISTED_EMAILS:-}"
+      EMAIL_TRANSPORT: "${EMAIL_TRANSPORT:-}"
+      FROM_EMAIL: "${FROM_EMAIL:-}"
+      RESEND_API_KEY: "${RESEND_API_KEY:-}"
+      # Alert email configuration (reuses login email settings)
+      ALERT_EMAIL_TRANSPORT: "${EMAIL_TRANSPORT:-}"
+      ALERT_FROM_EMAIL: "${FROM_EMAIL:-}"
+      ALERT_RESEND_API_KEY: "${RESEND_API_KEY:-}"
+      # Slack integration (required for Slack alerts)
+      ORG_SLACK_INTEGRATION_CLIENT_ID: "${ORG_SLACK_INTEGRATION_CLIENT_ID:-}"
+      ORG_SLACK_INTEGRATION_CLIENT_SECRET: "${ORG_SLACK_INTEGRATION_CLIENT_SECRET:-}"
+      # Admin auto-promotion (regex pattern)
+      ADMIN_EMAILS: "${ADMIN_EMAILS:-}"
+    volumes:
+      - "shared-data:/home/node/shared"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - "-e"
+        - "require('http').get('http://127.0.0.1:3000/healthcheck',(r)=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  registry:
+    image: "registry:2"
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        apk add --no-cache apache2-utils
+        mkdir -p /auth
+        htpasswd -Bbn "$${REGISTRY_USERNAME}" "$${REGISTRY_PASSWORD}" > /auth/htpasswd
+        exec /entrypoint.sh /etc/docker/registry/config.yml
+    networks:
+      - default
+      - dokploy-network
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 5
+      resources:
+        limits:
+          cpus: "1"
+          memory: "1G"
+    environment:
+      REGISTRY_USERNAME: ${REGISTRY_USERNAME:-trigger}
+      REGISTRY_PASSWORD: "${REGISTRY_PASSWORD}"
+      REGISTRY_AUTH: htpasswd
+      REGISTRY_AUTH_HTPASSWD_REALM: "Registry Realm"
+      REGISTRY_AUTH_HTPASSWD_PATH: /auth/htpasswd
+      REGISTRY_HTTP_SECRET: "${REGISTRY_PASSWORD}"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:5000/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+volumes:
+  shared-data:
+
+networks:
+  dokploy-network:
+    external: true

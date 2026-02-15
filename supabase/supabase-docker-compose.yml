@@ -203,6 +203,18 @@ configs:
           plugins:
             - name: cors
 
+        ## Edge Functions routes
+        - name: functions-v1
+          _comment: 'Edge Functions: /functions/v1/* -> http://functions:9000/*'
+          url: http://functions:9000/
+          routes:
+            - name: functions-v1-all
+              strip_path: true
+              paths:
+                - /functions/v1/
+          plugins:
+            - name: cors
+
         ## Analytics routes
         - name: analytics-v1
           _comment: 'Analytics: /analytics/v1/* -> http://logflare:4000/*'
@@ -231,6 +243,48 @@ configs:
                 hide_groups_header: true
                 allow:
                   - admin
+
+        ## Block access to /api/mcp
+        - name: mcp-blocker
+          _comment: 'Block direct access to /api/mcp'
+          url: http://studio:3000/api/mcp
+          routes:
+            - name: mcp-blocker-route
+              strip_path: true
+              paths:
+                - /api/mcp
+          plugins:
+            - name: request-termination
+              config:
+                status_code: 403
+                message: "Access is forbidden."
+
+        ## MCP endpoint - local access
+        - name: mcp
+          _comment: 'MCP: /mcp -> http://studio:3000/api/mcp (local access)'
+          url: http://studio:3000/api/mcp
+          routes:
+            - name: mcp
+              strip_path: true
+              paths:
+                - /mcp
+          plugins:
+            ## Block access to /mcp by default
+            - name: request-termination
+              config:
+                status_code: 403
+                message: "Access is forbidden."
+            ## Enable local access (danger zone!)
+            ## 1. Comment out the 'request-termination' section above
+            ## 2. Uncomment the entire section below, including 'deny'
+            ## 3. Add your local IPs to the 'allow' list
+            #- name: cors
+            #- name: ip-restriction
+            #  config:
+            #    allow:
+            #      - 127.0.0.1
+            #      - ::1
+            #    deny: []
 
         ## Protected Dashboard - catch all remaining routes
         - name: dashboard
@@ -785,6 +839,7 @@ services:
     restart: unless-stopped
     volumes:
       - ../files/volumes/snippets:/app/snippets:Z
+      - ../files/volumes/functions:/app/edge-functions:Z
     healthcheck:
       test:
         [
@@ -818,6 +873,7 @@ services:
       AUTH_JWT_SECRET: ${JWT_SECRET}
       PG_META_CRYPTO_KEY: ${PG_META_CRYPTO_KEY}
 
+      # LOGFLARE_API_KEY is deprecated
       LOGFLARE_API_KEY: ${LOGFLARE_PUBLIC_ACCESS_TOKEN}
       LOGFLARE_PUBLIC_ACCESS_TOKEN: ${LOGFLARE_PUBLIC_ACCESS_TOKEN}
       LOGFLARE_PRIVATE_ACCESS_TOKEN: ${LOGFLARE_PRIVATE_ACCESS_TOKEN}
@@ -829,6 +885,7 @@ services:
       # NEXT_ANALYTICS_BACKEND_PROVIDER: bigquery
 
       SNIPPETS_MANAGEMENT_FOLDER: /app/snippets
+      EDGE_FUNCTIONS_MANAGEMENT_FOLDER: /app/edge-functions
 
   kong:
     container_name: ${CONTAINER_PREFIX}-kong
@@ -971,19 +1028,13 @@ services:
     healthcheck:
       test:
         [
-          "CMD",
-          "curl",
-          "-sSfL",
-          "--head",
-          "-o",
-          "/dev/null",
-          "-H",
-          "Authorization: Bearer ${ANON_KEY}",
-          "http://localhost:4000/api/tenants/realtime-dev/health"
+          "CMD-SHELL",
+          "curl -sSfL --head -o /dev/null -H \"Authorization: Bearer ${ANON_KEY}\" http://localhost:4000/api/tenants/realtime-dev/health"
         ]
       timeout: 5s
-      interval: 5s
+      interval: 30s
       retries: 3
+      start_period: 10s
     environment:
       PORT: 4000
       DB_HOST: ${POSTGRES_HOST}
@@ -999,9 +1050,8 @@ services:
       DNS_NODES: "''"
       RLIMIT_NOFILE: "10000"
       APP_NAME: realtime
-      REGION: us-east-1
-      SEED_SELF_HOST: true
-      RUN_JANITOR: true
+      SEED_SELF_HOST: "true"
+      RUN_JANITOR: "true"
       DISABLE_HEALTHCHECK_LOGGING: "true"
 
   # To use S3 backed storage: docker compose -f docker-compose.yml -f docker-compose.s3.yml up
@@ -1069,7 +1119,7 @@ services:
       IMGPROXY_BIND: ":5001"
       IMGPROXY_LOCAL_FILESYSTEM_ROOT: /
       IMGPROXY_USE_ETAG: "true"
-      IMGPROXY_AUTO_WEBP: ${IMGPROXY_AUTO_WEBP}
+      IMGPROXY_ENABLE_WEBP_DETECTION: ${IMGPROXY_ENABLE_WEBP_DETECTION}
       IMGPROXY_MAX_SRC_RESOLUTION: "16.8"
 
   meta:
@@ -1227,6 +1277,29 @@ services:
       ]
     security_opt:
       - "label=disable"
+
+  functions:
+    container_name: ${CONTAINER_PREFIX}-functions
+    image: supabase/edge-runtime:v1.70.0
+    restart: unless-stopped
+    volumes:
+      - ../files/volumes/functions:/home/deno/functions:Z
+    depends_on:
+      analytics:
+        condition: service_healthy
+    environment:
+      JWT_SECRET: ${JWT_SECRET}
+      SUPABASE_URL: http://kong:8000
+      SUPABASE_ANON_KEY: ${ANON_KEY}
+      SUPABASE_SERVICE_ROLE_KEY: ${SERVICE_ROLE_KEY}
+      SUPABASE_DB_URL: postgresql://postgres:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
+      VERIFY_JWT: "${FUNCTIONS_VERIFY_JWT}"
+    command:
+      [
+        "start",
+        "--main-service",
+        "/home/deno/functions/main"
+      ]
 
   # Update the DATABASE_URL if you are using an external Postgres database
   supavisor:
