@@ -34,6 +34,7 @@ services:
   trigger:
     image: "ghcr.io/triggerdotdev/trigger.dev@sha256:b208b821aebeafe1e814618e92009e104bcb66d7b67d9aee580f5b12ce9391ca"
     user: root
+    stop_grace_period: 35s
     command: |
       sh -c "chown -R node:node /home/node/shared && exec ./scripts/entrypoint.sh"
     networks:
@@ -52,6 +53,10 @@ services:
       update_config:
         parallelism: 1
         delay: 30s
+        order: start-first
+      rollback_config:
+        parallelism: 1
+        delay: 10s
         order: start-first
       resources:
         limits:
