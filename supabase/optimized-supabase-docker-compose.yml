@@ -18,7 +18,7 @@
 #   - Docker log rotation on all services
 #   - shm_size set on db for shared_buffers
 
-name: supabase-prod-test-1
+name: supabase
 
 # ═══════════════════════════════════════════════════════════════════
 # Inline config files — embedded so the compose is fully standalone
@@ -162,7 +162,7 @@ configs:
         ## Secure Realtime routes
         - name: realtime-v1-ws
           _comment: 'Realtime: /realtime/v1/* -> ws://realtime:4000/socket/*'
-          url: http://realtime-dev.supabase-realtime:4000/socket
+          url: http://realtime-dev.${CONTAINER_PREFIX}-realtime:4000/socket
           protocol: ws
           routes:
             - name: realtime-v1-ws
@@ -182,7 +182,7 @@ configs:
                   - anon
         - name: realtime-v1-rest
           _comment: 'Realtime: /realtime/v1/* -> ws://realtime:4000/socket/*'
-          url: http://realtime-dev.supabase-realtime:4000/api
+          url: http://realtime-dev.${CONTAINER_PREFIX}-realtime:4000/api
           protocol: http
           routes:
             - name: realtime-v1-rest
@@ -846,7 +846,7 @@ configs:
 services:
   studio:
     container_name: ${CONTAINER_PREFIX}-studio
-    image: supabase/studio:2026.01.27-sha-6aa59ff
+    image: supabase/studio:2026.02.09-sha-18cc6f8
     restart: unless-stopped
     volumes:
       - ../files/volumes/snippets:/app/snippets:Z
@@ -1104,7 +1104,7 @@ services:
   # To use S3 backed storage: docker compose -f docker-compose.yml -f docker-compose.s3.yml up
   storage:
     container_name: ${CONTAINER_PREFIX}-storage
-    image: supabase/storage-api:v1.37.1
+    image: supabase/storage-api:v1.37.7
     restart: unless-stopped
     volumes:
       - ../files/volumes/storage:/var/lib/storage:z
@@ -1238,6 +1238,27 @@ services:
         max-size: ${LOG_MAX_SIZE:-10m}
         max-file: ${LOG_MAX_FILE:-3}
 
+  # One-shot init: copies image default config files to the bind mount on first deploy.
+  # Required because bind mounts hide the image's /etc/postgresql-custom/ files
+  # (unlike named volumes which auto-copy on first use).
+  db-init:
+    container_name: ${CONTAINER_PREFIX}-db-init
+    image: supabase/postgres:17.6.1.081
+    restart: "no"
+    volumes:
+      - ../files/volumes/db/config:/mnt/db-config:Z
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        if [ -z "$$(ls -A /mnt/db-config 2>/dev/null)" ]; then
+          echo "First run: populating db config from image defaults..."
+          cp -a /etc/postgresql-custom/* /mnt/db-config/
+          chown -R postgres:postgres /mnt/db-config/
+          echo "Done."
+        else
+          echo "Config directory already populated, skipping."
+        fi
+
   # Comment out everything below this point if you are using an external Postgres database
   db:
     container_name: ${CONTAINER_PREFIX}-db
@@ -1267,14 +1288,16 @@ services:
     volumes:
       # PGDATA directory is persisted between restarts
       - ../files/volumes/db/data:/var/lib/postgresql/data:Z
-      # Use named volume to persist pgsodium decryption key between restarts
-      - db-config:/etc/postgresql-custom
+      # Persist pgsodium decryption key between restarts (bind mount, not named volume)
+      - ../files/volumes/db/config:/etc/postgresql-custom:Z
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "postgres", "-h", "localhost"]
       interval: 5s
       timeout: 5s
       retries: 10
     depends_on:
+      db-init:
+        condition: service_completed_successfully
       vector:
         condition: service_healthy
     environment:
@@ -1462,9 +1485,6 @@ services:
       options:
         max-size: ${LOG_MAX_SIZE:-10m}
         max-file: ${LOG_MAX_FILE:-3}
-
-volumes:
-  db-config:
 
 networks:
   dokploy-network:

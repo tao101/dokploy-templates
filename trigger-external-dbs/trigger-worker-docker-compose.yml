@@ -1,18 +1,18 @@
-# Trigger.dev Worker for Dokploy (Distributed Setup)
-# ===================================================
-# Deploy this on each worker server to connect to your main webapp.
-# Workers execute tasks and connect to the webapp via TRIGGER_API_URL.
+# Trigger.dev Worker (Dokploy Remote Server)
+# ===========================================
+# Deploy this on each worker server (Dokploy remote server, NOT in Swarm).
+# Workers execute tasks and connect to the webapp via TRIGGER_API_URL (HTTPS).
 #
 # Requires: webapp deployed first (get TRIGGER_WORKER_TOKEN from webapp logs)
 #
 # Worker Token (one-time):
-#   docker logs <trigger-container> | grep -A15 "Worker Token"
+#   docker service logs <trigger-service> | grep -A15 "Worker Token"
 
 name: trigger-worker
 
 services:
   supervisor:
-    image: 'ghcr.io/triggerdotdev/supervisor:prod-c859be9-1768837617'
+    image: "ghcr.io/triggerdotdev/supervisor:prod-c859be9-1768837617"
     container_name: ${CONTAINER_PREFIX}-supervisor
     restart: unless-stopped
     depends_on:
@@ -22,63 +22,69 @@ services:
       sh -c "exec /usr/bin/dumb-init -- pnpm run --filter supervisor start"
     networks:
       default:
-      dokploy-network:
+      trigger-tasks:
         aliases:
           - supervisor
     ports:
       - "8020:8020"
     environment:
       # Connect to remote webapp (REQUIRED - set in env)
-      TRIGGER_API_URL: '${TRIGGER_API_URL}'
+      TRIGGER_API_URL: "${TRIGGER_API_URL}"
       # OTEL endpoint for sending task run logs to the dashboard
-      OTEL_EXPORTER_OTLP_ENDPOINT: '${TRIGGER_API_URL}/otel'
+      OTEL_EXPORTER_OTLP_ENDPOINT: "${TRIGGER_API_URL}/otel"
 
       # Worker authentication (REQUIRED - get from webapp after first deploy)
-      TRIGGER_WORKER_TOKEN: '${TRIGGER_WORKER_TOKEN}'
+      TRIGGER_WORKER_TOKEN: "${TRIGGER_WORKER_TOKEN}"
 
       # Must match webapp's MANAGED_WORKER_SECRET
-      MANAGED_WORKER_SECRET: '${MANAGED_WORKER_SECRET}'
+      MANAGED_WORKER_SECRET: "${MANAGED_WORKER_SECRET}"
 
       # Workload API settings
       TRIGGER_WORKLOAD_API_DOMAIN: supervisor
       TRIGGER_WORKLOAD_API_PORT_EXTERNAL: 8020
 
       # Docker settings
-      DOCKER_HOST: 'tcp://docker-proxy:2375'
-      # Task containers join dokploy-network (always exists on Dokploy servers)
-      DOCKER_RUNNER_NETWORKS: 'dokploy-network'
+      DOCKER_HOST: "tcp://docker-proxy:2375"
+      # Task containers join trigger-tasks bridge network (local to this server)
+      DOCKER_RUNNER_NETWORKS: "trigger-tasks"
       DOCKER_AUTOREMOVE_EXITED_CONTAINERS: 1
-      DOCKER_ENFORCE_MACHINE_PRESETS: '${DOCKER_ENFORCE_MACHINE_PRESETS:-false}'
+      DOCKER_ENFORCE_MACHINE_PRESETS: "${DOCKER_ENFORCE_MACHINE_PRESETS:-false}"
 
       # Registry settings (must match webapp)
-      DOCKER_REGISTRY_URL: '${DOCKER_REGISTRY_URL}'
-      DOCKER_REGISTRY_USERNAME: '${REGISTRY_USERNAME:-trigger}'
-      DOCKER_REGISTRY_PASSWORD: '${REGISTRY_PASSWORD}'
+      DOCKER_REGISTRY_URL: "${DOCKER_REGISTRY_URL}"
+      DOCKER_REGISTRY_USERNAME: "${REGISTRY_USERNAME:-trigger}"
+      DOCKER_REGISTRY_PASSWORD: "${REGISTRY_PASSWORD}"
 
       # Scaling settings
-      TRIGGER_DEQUEUE_MAX_CONSUMER_COUNT: '${DEQUEUE_CONSUMER_COUNT:-10}'
-      TRIGGER_DEQUEUE_MAX_RUN_COUNT: '${DEQUEUE_RUN_COUNT:-20}'
-      TRIGGER_DEQUEUE_INTERVAL_MS: '${DEQUEUE_INTERVAL_MS:-1500}'
-      TRIGGER_DEQUEUE_MIN_CONSUMER_COUNT: '${DEQUEUE_MIN_CONSUMER_COUNT:-1}'
-      TRIGGER_DEQUEUE_IDLE_INTERVAL_MS: '${DEQUEUE_IDLE_INTERVAL_MS:-5000}'
-      TRIGGER_DEQUEUE_SCALING_STRATEGY: '${DEQUEUE_SCALING_STRATEGY:-smooth}'
-      TRIGGER_DEQUEUE_SCALING_UP_COOLDOWN_MS: '${DEQUEUE_SCALING_UP_COOLDOWN_MS:-10000}'
-      TRIGGER_DEQUEUE_SCALING_DOWN_COOLDOWN_MS: '${DEQUEUE_SCALING_DOWN_COOLDOWN_MS:-5000}'
+      TRIGGER_DEQUEUE_MAX_CONSUMER_COUNT: "${DEQUEUE_CONSUMER_COUNT:-8}"
+      TRIGGER_DEQUEUE_MAX_RUN_COUNT: "${DEQUEUE_RUN_COUNT:-8}"
+      TRIGGER_DEQUEUE_INTERVAL_MS: "${DEQUEUE_INTERVAL_MS:-250}"
+      TRIGGER_DEQUEUE_MIN_CONSUMER_COUNT: "${DEQUEUE_MIN_CONSUMER_COUNT:-1}"
+      TRIGGER_DEQUEUE_IDLE_INTERVAL_MS: "${DEQUEUE_IDLE_INTERVAL_MS:-5000}"
+      TRIGGER_DEQUEUE_SCALING_STRATEGY: "${DEQUEUE_SCALING_STRATEGY:-smooth}"
+      TRIGGER_DEQUEUE_SCALING_UP_COOLDOWN_MS: "${DEQUEUE_SCALING_UP_COOLDOWN_MS:-10000}"
+      TRIGGER_DEQUEUE_SCALING_DOWN_COOLDOWN_MS: "${DEQUEUE_SCALING_DOWN_COOLDOWN_MS:-5000}"
 
       # Runner settings
-      RUNNER_SNAPSHOT_POLL_INTERVAL_SECONDS: '${RUNNER_SNAPSHOT_POLL_INTERVAL_SECONDS:-10}'
+      RUNNER_SNAPSHOT_POLL_INTERVAL_SECONDS: "${RUNNER_SNAPSHOT_POLL_INTERVAL_SECONDS:-5}"
 
       # Machine presets enforcement (0 = disabled for faster startup)
-      ENFORCE_MACHINE_PRESETS: '${ENFORCE_MACHINE_PRESETS:-0}'
+      ENFORCE_MACHINE_PRESETS: "${ENFORCE_MACHINE_PRESETS:-0}"
 
       # Debug mode
-      DEBUG: '${DEBUG:-0}'
+      DEBUG: "${DEBUG:-0}"
 
       # Logging options
-      SEND_RUN_DEBUG_LOGS: '${SEND_RUN_DEBUG_LOGS:-true}'
-      RUNNER_PRETTY_LOGS: '${RUNNER_PRETTY_LOGS:-true}'
+      SEND_RUN_DEBUG_LOGS: "${SEND_RUN_DEBUG_LOGS:-true}"
+      RUNNER_PRETTY_LOGS: "${RUNNER_PRETTY_LOGS:-true}"
     healthcheck:
-      test: ["CMD", "node", "-e", "require('http').get('http://localhost:8020/health',(r)=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "require('http').get('http://localhost:8020/health',(r)=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))",
+        ]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -92,11 +98,11 @@ services:
         max-file: "5"
 
   docker-proxy:
-    image: 'tecnativa/docker-socket-proxy:latest'
+    image: "tecnativa/docker-socket-proxy:latest"
     container_name: ${CONTAINER_PREFIX}-docker-proxy
     restart: unless-stopped
     volumes:
-      - '/var/run/docker.sock:/var/run/docker.sock:ro'
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
     environment:
       LOG_LEVEL: info
       POST: 1
@@ -119,5 +125,6 @@ services:
         max-file: "5"
 
 networks:
-  dokploy-network:
-    external: true
+  trigger-tasks:
+    name: trigger-tasks
+    driver: bridge

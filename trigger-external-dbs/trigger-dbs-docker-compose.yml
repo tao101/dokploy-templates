@@ -1,35 +1,32 @@
-# Trigger.dev External Databases for Dokploy Swarm
-# =================================================
-# Standalone template: paste this compose + env file into Dokploy and deploy.
-# All configurations are self-contained — no external file mounts needed.
+# Trigger.dev External Databases (Dokploy Remote Server)
+# ======================================================
+# Standalone template: paste this compose + env file into Dokploy and deploy
+# on a dedicated DB server (Dokploy remote server, NOT in Swarm).
 #
-# Services: postgres, redis, electric, clickhouse, minio
+# Services: postgres, redis, electric, clickhouse, minio, minio-init
 # Deploy this FIRST, before the webapp compose.
 #
-# This compose exposes all services on dokploy-network via aliases:
-#   trigger-postgres, trigger-redis, trigger-clickhouse,
-#   trigger-electric, trigger-minio
-#
-# The webapp compose connects to these aliases — no IP addresses needed.
+# All services expose ports on the host. The webapp connects via DB_HOST:port.
+# Firewall rules on this server MUST restrict access to the webapp server IP only.
+# See server-setup-dbs.md for firewall configuration.
 
 name: trigger-dbs
 
 services:
   postgres:
-    image: postgres:14
+    image: postgres:16
     container_name: ${CONTAINER_PREFIX}-postgres
     restart: unless-stopped
-    networks:
-      default:
-      dokploy-network:
-        aliases:
-          - trigger-postgres
+    shm_size: ${PG_SHM_SIZE:-8g}
+    ports:
+      - "5432:5432"
     command:
       - -c
       - wal_level=logical
+      # ── Connections ──
       - -c
       - max_connections=${PG_MAX_CONNECTIONS:-1500}
-      # Memory settings - Optimized for 8 vCPU / 32GB RAM
+      # ── Memory (tuned for 8 vCPU / 32GB RAM) ──
       - -c
       - shared_buffers=${PG_SHARED_BUFFERS:-8GB}
       - -c
@@ -40,30 +37,41 @@ services:
       - -c
       - maintenance_work_mem=${PG_MAINTENANCE_WORK_MEM:-2GB}
       - -c
-      - checkpoint_completion_target=0.9
-      # NVMe optimizations (Hetzner Cloud)
+      - autovacuum_work_mem=${PG_AUTOVACUUM_WORK_MEM:-256MB}
+      # ── WAL & Checkpoints ──
       - -c
-      - random_page_cost=1.1
+      - wal_buffers=${PG_WAL_BUFFERS:-64MB}
       - -c
-      - effective_io_concurrency=200
+      - checkpoint_completion_target=${PG_CHECKPOINT_COMPLETION:-0.9}
       - -c
-      - wal_buffers=64MB
+      - min_wal_size=${PG_MIN_WAL_SIZE:-1GB}
       - -c
-      - min_wal_size=1GB
+      - max_wal_size=${PG_MAX_WAL_SIZE:-4GB}
       - -c
-      - max_wal_size=4GB
+      - checkpoint_timeout=${PG_CHECKPOINT_TIMEOUT:-15min}
+      # ── NVMe SSD Optimization (Hetzner Cloud) ──
       - -c
-      - checkpoint_timeout=15min
+      - random_page_cost=${PG_RANDOM_PAGE_COST:-1.1}
       - -c
-      - default_statistics_target=100
+      - effective_io_concurrency=${PG_EFFECTIVE_IO_CONCURRENCY:-200}
       - -c
-      - huge_pages=try
+      - maintenance_io_concurrency=${PG_MAINTENANCE_IO_CONCURRENCY:-200}
+      # ── Parallelism (tuned for 8 vCPU) ──
       - -c
-      - max_parallel_workers_per_gather=4
+      - max_worker_processes=${PG_MAX_WORKER_PROCESSES:-8}
       - -c
-      - max_worker_processes=8
+      - max_parallel_workers=${PG_MAX_PARALLEL_WORKERS:-8}
       - -c
-      - statement_timeout=30000
+      - max_parallel_workers_per_gather=${PG_MAX_PARALLEL_WORKERS_PER_GATHER:-4}
+      - -c
+      - max_parallel_maintenance_workers=${PG_MAX_PARALLEL_MAINTENANCE_WORKERS:-4}
+      # ── Misc ──
+      - -c
+      - default_statistics_target=${PG_DEFAULT_STATISTICS_TARGET:-100}
+      - -c
+      - huge_pages=${PG_HUGE_PAGES:-try}
+      - -c
+      - statement_timeout=${PG_STATEMENT_TIMEOUT:-30000}
     environment:
       POSTGRES_USER: "postgres"
       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
@@ -86,14 +94,12 @@ services:
     image: "redis:7"
     container_name: ${CONTAINER_PREFIX}-redis
     restart: unless-stopped
-    networks:
-      default:
-      dokploy-network:
-        aliases:
-          - trigger-redis
+    ports:
+      - "6379:6379"
     # Optimized for 8 vCPU / 32GB RAM - doubled resources for heavy worker polling
     command: >-
       redis-server
+      --requirepass ${REDIS_PASSWORD}
       --maxmemory ${REDIS_MAXMEMORY:-12gb}
       --maxmemory-policy noeviction
       --appendonly yes
@@ -106,7 +112,7 @@ services:
     volumes:
       - "redis-data:/data"
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -118,19 +124,16 @@ services:
         max-file: "5"
 
   electric:
-    image: "electricsql/electric:1.2.9"
+    image: "electricsql/electric:1.4.4"
     container_name: ${CONTAINER_PREFIX}-electric
     restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
-    networks:
-      default:
-      dokploy-network:
-        aliases:
-          - trigger-electric
+    ports:
+      - "3000:3000"
     environment:
-      # Uses intra-compose hostname (postgres), NOT the alias (trigger-postgres)
+      # Uses intra-compose hostname (postgres) for internal communication
       DATABASE_URL: "postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-trigger}?schema=public&sslmode=disable"
       ELECTRIC_SECRET: "${ELECTRIC_SECRET}"
       ELECTRIC_USAGE_REPORTING: "false"
@@ -153,11 +156,8 @@ services:
     image: "clickhouse/clickhouse-server:25.8"
     container_name: ${CONTAINER_PREFIX}-clickhouse
     restart: unless-stopped
-    networks:
-      default:
-      dokploy-network:
-        aliases:
-          - trigger-clickhouse
+    ports:
+      - "8123:8123"
     ulimits:
       nofile:
         soft: 262144
@@ -182,10 +182,10 @@ services:
                 <level>warning</level>
             </logger>
 
-            <!-- Memory settings - DOUBLED for 32GB RAM (heavy worker polling) -->
-            <mark_cache_size>10737418240</mark_cache_size> <!-- 10GB -->
-            <uncompressed_cache_size>17179869184</uncompressed_cache_size> <!-- 16GB -->
-            <max_server_memory_usage_to_ram_ratio>0.9</max_server_memory_usage_to_ram_ratio>
+            <!-- Memory settings - capped at 50% RAM (shared server with PG, Redis, etc.) -->
+            <mark_cache_size>4294967296</mark_cache_size> <!-- 4GB -->
+            <uncompressed_cache_size>6442450944</uncompressed_cache_size> <!-- 6GB -->
+            <max_server_memory_usage_to_ram_ratio>0.5</max_server_memory_usage_to_ram_ratio>
 
             <!-- Concurrency settings - DOUBLED for 8 vCPU (heavy worker polling) -->
             <max_concurrent_queries>300</max_concurrent_queries>
@@ -252,23 +252,21 @@ services:
         max-file: "5"
 
   minio:
-    image: bitnamilegacy/minio:latest
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
     container_name: ${CONTAINER_PREFIX}-minio
     restart: unless-stopped
-    networks:
-      default:
-      dokploy-network:
-        aliases:
-          - trigger-minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-admin}
       MINIO_ROOT_PASSWORD: "${MINIO_PASSWORD}"
-      MINIO_DEFAULT_BUCKETS: packets
       MINIO_BROWSER: "on"
     volumes:
-      - "minio-data:/bitnami/minio/data"
+      - "minio-data:/data"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      test: ["CMD", "mc", "ready", "local"]
       interval: 5s
       timeout: 10s
       retries: 5
@@ -279,6 +277,25 @@ services:
         max-size: "50m"
         max-file: "5"
 
+  minio-init:
+    image: minio/mc:latest
+    container_name: ${CONTAINER_PREFIX}-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - default
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        mc alias set myminio http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD}
+        mc mb --ignore-existing myminio/packets
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-admin}
+      MINIO_ROOT_PASSWORD: "${MINIO_PASSWORD}"
+
 volumes:
   postgres-data:
   redis-data:
@@ -286,6 +303,3 @@ volumes:
   clickhouse-logs:
   minio-data:
 
-networks:
-  dokploy-network:
-    external: true

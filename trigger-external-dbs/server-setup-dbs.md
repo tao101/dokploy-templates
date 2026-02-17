@@ -83,7 +83,50 @@ If you enable huge pages, also add to `/etc/sysctl.conf`:
 echo "vm.nr_hugepages=4096" | sudo tee -a /etc/sysctl.conf
 ```
 
-## 6. Verify
+## 6. Firewall — Restrict Database Ports
+
+The DB server exposes service ports on the host for the webapp to connect. Restrict access to the webapp server IP only.
+
+Replace `WEBAPP_IP` with the actual public IP of your webapp server.
+
+### Option A: ufw (Ubuntu/Debian)
+
+```bash
+sudo ufw allow from WEBAPP_IP to any port 5432 comment "Trigger.dev webapp -> postgres"
+sudo ufw allow from WEBAPP_IP to any port 6379 comment "Trigger.dev webapp -> redis"
+sudo ufw allow from WEBAPP_IP to any port 3000 comment "Trigger.dev webapp -> electric"
+sudo ufw allow from WEBAPP_IP to any port 8123 comment "Trigger.dev webapp -> clickhouse"
+sudo ufw allow from WEBAPP_IP to any port 9000 comment "Trigger.dev webapp -> minio API"
+sudo ufw allow from WEBAPP_IP to any port 9001 comment "Trigger.dev webapp -> minio console"
+
+# Block all other access to these ports
+sudo ufw deny 5432
+sudo ufw deny 6379
+sudo ufw deny 3000
+sudo ufw deny 8123
+sudo ufw deny 9000
+sudo ufw deny 9001
+```
+
+### Option B: firewalld (RHEL/CentOS/Fedora)
+
+```bash
+for port in 5432 6379 3000 8123 9000 9001; do
+  sudo firewall-cmd --permanent --add-rich-rule="rule family=ipv4 source address=WEBAPP_IP port protocol=tcp port=$port accept"
+done
+sudo firewall-cmd --reload
+```
+
+### Option C: iptables (fallback)
+
+```bash
+for port in 5432 6379 3000 8123 9000 9001; do
+  sudo iptables -A INPUT -p tcp --dport $port -s WEBAPP_IP -j ACCEPT
+  sudo iptables -A INPUT -p tcp --dport $port -j DROP
+done
+```
+
+## 7. Verify
 
 ```bash
 sysctl vm.overcommit_memory vm.swappiness fs.file-max net.core.somaxconn
@@ -91,6 +134,19 @@ sysctl net.ipv4.tcp_keepalive_time net.ipv4.tcp_keepalive_intvl net.ipv4.tcp_kee
 sysctl net.ipv4.tcp_tw_reuse
 swapon --show
 ulimit -n
+```
+
+Check firewall rules:
+
+```bash
+# ufw
+sudo ufw status | grep -E "5432|6379|3000|8123|9000|9001"
+
+# firewalld
+sudo firewall-cmd --list-rich-rules
+
+# iptables
+sudo iptables -L -n | grep -E "5432|6379|3000|8123|9000|9001"
 ```
 
 Expected:
@@ -102,3 +158,4 @@ Expected:
 - `tcp_tw_reuse = 1`
 - No swap entries
 - `ulimit -n` = 262144 (may need re-login)
+- DB ports (5432, 6379, 3000, 8123, 9000, 9001) allowed from webapp IP only

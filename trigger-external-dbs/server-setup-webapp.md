@@ -56,14 +56,90 @@ echo "root soft nofile 65536" | sudo tee -a /etc/security/limits.conf
 echo "root hard nofile 65536" | sudo tee -a /etc/security/limits.conf
 ```
 
-## 4. Disable Swap
+## 4. NFS Server (Multi-Node Swarm)
+
+The trigger webapp uses a shared NFS volume for the bootstrap worker token so replicas can run on any Swarm node. Set up NFS on the **manager node** (this server).
+
+### 4.1 Install NFS Server
+
+```bash
+sudo apt install -y nfs-kernel-server
+```
+
+### 4.2 Create Export Directory
+
+```bash
+sudo mkdir -p /srv/nfs/trigger-shared
+sudo chown 1000:1000 /srv/nfs/trigger-shared
+```
+
+UID 1000 = `node` user inside the trigger container.
+
+### 4.3 Configure Exports
+
+Replace `SWARM_WORKER_IP` with each Swarm worker node's IP. Add one line per worker node:
+
+```bash
+echo "/srv/nfs/trigger-shared SWARM_WORKER_IP(rw,sync,no_subtree_check,no_root_squash)" | sudo tee -a /etc/exports
+```
+
+Also allow localhost (for manager-local replicas):
+
+```bash
+echo "/srv/nfs/trigger-shared 127.0.0.1(rw,sync,no_subtree_check,no_root_squash)" | sudo tee -a /etc/exports
+```
+
+Apply and enable:
+
+```bash
+sudo exportfs -ra
+sudo systemctl enable --now nfs-kernel-server
+```
+
+### 4.4 Firewall — Allow NFS from Worker Nodes
+
+Replace `SWARM_WORKER_IP` with each worker node's IP:
+
+```bash
+sudo ufw allow from SWARM_WORKER_IP to any port 2049 comment "NFS for Swarm shared volume"
+```
+
+### 4.5 Install NFS Client on Worker Nodes
+
+SSH into **each Swarm worker node** and install the NFS client:
+
+```bash
+sudo apt install -y nfs-common
+```
+
+### 4.6 Verify NFS
+
+From the manager:
+
+```bash
+showmount -e localhost
+```
+
+Expected: `/srv/nfs/trigger-shared` with your worker IP(s).
+
+From each worker node:
+
+```bash
+sudo mount -t nfs <MANAGER_IP>:/srv/nfs/trigger-shared /mnt
+ls /mnt
+sudo umount /mnt
+```
+
+Should mount and list without errors.
+
+## 5. Disable Swap
 
 ```bash
 sudo swapoff -a
 sudo sed -i '/\sswap\s/s/^/#/' /etc/fstab
 ```
 
-## 5. Verify
+## 6. Verify
 
 ```bash
 sysctl vm.swappiness fs.file-max net.core.somaxconn

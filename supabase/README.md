@@ -195,10 +195,10 @@ openssl rand -hex 32
 | **auth** | `supabase/gotrue:v2.185.0` | Authentication (GoTrue) |
 | **rest** | `postgrest/postgrest:v14.3` | RESTful API (PostgREST) |
 | **realtime** | `supabase/realtime:v2.72.0` | WebSocket subscriptions |
-| **storage** | `supabase/storage-api:v1.37.1` | File storage API |
+| **storage** | `supabase/storage-api:v1.37.7` | File storage API |
 | **imgproxy** | `darthsim/imgproxy:v3.30.1` | Image transformation |
 | **meta** | `supabase/postgres-meta:v0.95.2` | Database metadata API |
-| **studio** | `supabase/studio:2026.01.27-sha-6aa59ff` | Dashboard UI |
+| **studio** | `supabase/studio:2026.02.09-sha-18cc6f8` | Dashboard UI |
 | **analytics** | `supabase/logflare:1.30.3` | Log analytics |
 | **vector** | `timberio/vector:0.28.1-alpine` | Log collection |
 | **supavisor** | `supabase/supavisor:2.7.4` | Connection pooler |

@@ -3,12 +3,20 @@
 # Deploy as Dokploy "Stack" type for Docker Swarm with replicas.
 # All configurations are self-contained — no external file mounts needed.
 #
-# Services: trigger (web app), registry
-# Databases are EXTERNAL — deploy trigger-dbs-docker-compose.yml FIRST.
+# Scaling: Each replica runs a single Node.js process. Scale horizontally
+# by increasing TRIGGER_REPLICAS — Swarm handles load balancing.
+# Replicas spread across all Swarm nodes (manager + workers).
+# Adjust per-replica resources (TRIGGER_CPUS, TRIGGER_MEMORY) to fit your nodes.
 #
-# This compose connects to external DBs via dokploy-network aliases:
-#   trigger-postgres, trigger-redis, trigger-clickhouse,
-#   trigger-electric, trigger-minio
+# NFS Requirement: The shared-data volume uses NFS so the bootstrap worker
+# token is accessible from replicas on any Swarm node. Set up NFS server on
+# the manager node BEFORE deploying. See server-setup-webapp.md § NFS.
+#
+# Services: trigger (web app), registry
+# Databases are EXTERNAL — deploy trigger-dbs-docker-compose.yml FIRST on the DB server.
+#
+# This compose connects to external DBs via ${DB_HOST}:port (DB server public IP).
+# Set DB_HOST in trigger-webapp.env to the DB server's IP address.
 #
 # Domain Setup (after deploy):
 #   1. In Dokploy UI, add domain for trigger service -> port 3000 (HTTPS)
@@ -32,7 +40,10 @@ services:
       - default
       - dokploy-network
     deploy:
-      replicas: ${TRIGGER_REPLICAS:-2}
+      replicas: ${TRIGGER_REPLICAS:-3}
+      placement:
+        preferences:
+          - spread: node.id
       restart_policy:
         condition: on-failure
         delay: 10s
@@ -44,15 +55,12 @@ services:
         order: start-first
       resources:
         limits:
-          cpus: "${TRIGGER_CPUS:-6}"
-          memory: "${TRIGGER_MEMORY:-24G}"
+          cpus: "${TRIGGER_CPUS:-2}"
+          memory: "${TRIGGER_MEMORY:-5G}"
         reservations:
-          cpus: "${TRIGGER_CPUS_RESERVED:-2}"
-          memory: "${TRIGGER_MEMORY_RESERVED:-8G}"
+          cpus: "${TRIGGER_CPUS_RESERVED:-1}"
+          memory: "${TRIGGER_MEMORY_RESERVED:-2G}"
     environment:
-      # Clustering - enable multi-process mode (8 vCPU / 32GB RAM, no DBs on this server)
-      ENABLE_CLUSTER: 1
-      WEB_CONCURRENCY: 7
       # Batch Queue - prevents stuck batches from leaked concurrency tokens
       BATCH_QUEUE_SHARD_COUNT: 2
       BATCH_CONCURRENCY_LIMIT_DEFAULT: 10
@@ -88,49 +96,50 @@ services:
       MAGIC_LINK_SECRET: "${MAGIC_LINK_SECRET}"
       ENCRYPTION_KEY: "${ENCRYPTION_KEY}"
       MANAGED_WORKER_SECRET: "${MANAGED_WORKER_SECRET}"
-      # External databases via dokploy-network aliases
-      DATABASE_URL: "postgresql://postgres:${POSTGRES_PASSWORD}@trigger-postgres:5432/${POSTGRES_DB:-trigger}?schema=public&sslmode=disable"
-      DIRECT_URL: "postgresql://postgres:${POSTGRES_PASSWORD}@trigger-postgres:5432/${POSTGRES_DB:-trigger}?schema=public&sslmode=disable"
-      REDIS_HOST: trigger-redis
+      # External databases via DB_HOST (DB server public IP)
+      DATABASE_URL: "postgresql://postgres:${POSTGRES_PASSWORD}@${DB_HOST}:5432/${POSTGRES_DB:-trigger}?schema=public&sslmode=disable"
+      DIRECT_URL: "postgresql://postgres:${POSTGRES_PASSWORD}@${DB_HOST}:5432/${POSTGRES_DB:-trigger}?schema=public&sslmode=disable"
+      REDIS_HOST: "${DB_HOST}"
       REDIS_PORT: 6379
-      REDIS_TLS_DISABLED: true
-      ELECTRIC_ORIGIN: "http://trigger-electric:3000"
+      REDIS_PASSWORD: "${REDIS_PASSWORD}"
+      REDIS_TLS_DISABLED: "true"
+      ELECTRIC_ORIGIN: "http://${DB_HOST}:3000"
       DEV_OTEL_EXPORTER_OTLP_ENDPOINT: "https://${TRIGGER_DOMAIN}/otel"
       DEPLOY_REGISTRY_HOST: "${REGISTRY_DOMAIN}"
       DEPLOY_REGISTRY_NAMESPACE: "${REGISTRY_NAMESPACE:-trigger}"
       DEPLOY_REGISTRY_USERNAME: "${REGISTRY_USERNAME:-trigger}"
       DEPLOY_REGISTRY_PASSWORD: "${REGISTRY_PASSWORD}"
-      OBJECT_STORE_BASE_URL: "http://trigger-minio:9000"
+      OBJECT_STORE_BASE_URL: "http://${DB_HOST}:9000"
       OBJECT_STORE_ACCESS_KEY_ID: "${MINIO_ROOT_USER:-admin}"
       OBJECT_STORE_SECRET_ACCESS_KEY: "${MINIO_PASSWORD}"
       GRACEFUL_SHUTDOWN_TIMEOUT: 30000
-      NODE_MAX_OLD_SPACE_SIZE: "${NODE_MAX_OLD_SPACE_SIZE:-24576}"
+      NODE_MAX_OLD_SPACE_SIZE: "${NODE_MAX_OLD_SPACE_SIZE:-4096}"
       # Bootstrap is ENABLED - workers will get their token from this webapp
       TRIGGER_BOOTSTRAP_ENABLED: 1
       TRIGGER_BOOTSTRAP_WORKER_GROUP_NAME: bootstrap
       TRIGGER_BOOTSTRAP_WORKER_TOKEN_PATH: /home/node/shared/worker_token
-      CLICKHOUSE_URL: "http://${CLICKHOUSE_ADMIN_USER:-default}:${CLICKHOUSE_PASSWORD}@trigger-clickhouse:8123?secure=false"
+      CLICKHOUSE_URL: "http://${CLICKHOUSE_ADMIN_USER:-default}:${CLICKHOUSE_PASSWORD}@${DB_HOST}:8123?secure=false"
       CLICKHOUSE_LOG_LEVEL: info
       INTERNAL_OTEL_TRACE_LOGGING_ENABLED: 0
       RUN_REPLICATION_ENABLED: 1
-      RUN_REPLICATION_CLICKHOUSE_URL: "http://${CLICKHOUSE_ADMIN_USER:-default}:${CLICKHOUSE_PASSWORD}@trigger-clickhouse:8123"
+      RUN_REPLICATION_CLICKHOUSE_URL: "http://${CLICKHOUSE_ADMIN_USER:-default}:${CLICKHOUSE_PASSWORD}@${DB_HOST}:8123"
       RUN_REPLICATION_LOG_LEVEL: info
       APP_LOG_LEVEL: info
       TRIGGER_TELEMETRY_DISABLED: 0
-      # Email configuration for login/magic links (optional)
-      WHITELISTED_EMAILS: "${WHITELISTED_EMAILS:-}"
-      EMAIL_TRANSPORT: "${EMAIL_TRANSPORT:-}"
-      FROM_EMAIL: "${FROM_EMAIL:-}"
-      RESEND_API_KEY: "${RESEND_API_KEY:-}"
-      # Alert email configuration (reuses login email settings)
-      ALERT_EMAIL_TRANSPORT: "${EMAIL_TRANSPORT:-}"
-      ALERT_FROM_EMAIL: "${FROM_EMAIL:-}"
-      ALERT_RESEND_API_KEY: "${RESEND_API_KEY:-}"
-      # Slack integration (required for Slack alerts)
-      ORG_SLACK_INTEGRATION_CLIENT_ID: "${ORG_SLACK_INTEGRATION_CLIENT_ID:-}"
-      ORG_SLACK_INTEGRATION_CLIENT_SECRET: "${ORG_SLACK_INTEGRATION_CLIENT_SECRET:-}"
-      # Admin auto-promotion (regex pattern)
-      ADMIN_EMAILS: "${ADMIN_EMAILS:-}"
+      # ── Optional features ──
+      # To enable email login, add these lines to the environment section:
+      #   WHITELISTED_EMAILS: "user@example.com"
+      #   EMAIL_TRANSPORT: "resend"        # resend | smtp | aws-ses
+      #   FROM_EMAIL: "noreply@yourdomain.com"
+      #   RESEND_API_KEY: "re_xxxxxxxxxxxx"
+      #   ALERT_EMAIL_TRANSPORT: "resend"
+      #   ALERT_FROM_EMAIL: "noreply@yourdomain.com"
+      #   ALERT_RESEND_API_KEY: "re_xxxxxxxxxxxx"
+      # To enable Slack integration:
+      #   ORG_SLACK_INTEGRATION_CLIENT_ID: "your-client-id"
+      #   ORG_SLACK_INTEGRATION_CLIENT_SECRET: "your-client-secret"
+      # To auto-promote admins:
+      #   ADMIN_EMAILS: ".*@yourcompany\\.com"
     volumes:
       - "shared-data:/home/node/shared"
     healthcheck:
@@ -164,6 +173,9 @@ services:
       - dokploy-network
     deploy:
       replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
       restart_policy:
         condition: on-failure
         delay: 5s
@@ -179,6 +191,8 @@ services:
       REGISTRY_AUTH_HTPASSWD_REALM: "Registry Realm"
       REGISTRY_AUTH_HTPASSWD_PATH: /auth/htpasswd
       REGISTRY_HTTP_SECRET: "${REGISTRY_PASSWORD}"
+    volumes:
+      - "registry-data:/var/lib/registry"
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:5000/"]
       interval: 10s
@@ -193,6 +207,12 @@ services:
 
 volumes:
   shared-data:
+    driver: local
+    driver_opts:
+      type: nfs
+      o: "addr=${NFS_SERVER_IP:-159.69.194.213},rw,nolock,soft,nfsvers=4"
+      device: ":/srv/nfs/trigger-shared"
+  registry-data:
 
 networks:
   dokploy-network:
