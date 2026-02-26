@@ -817,12 +817,15 @@ configs:
         "auth_query" => "SELECT * FROM pgbouncer.get_auth($$1)",
         "default_max_clients" => System.get_env("POOLER_MAX_CLIENT_CONN"),
         "default_pool_size" => System.get_env("POOLER_DEFAULT_POOL_SIZE"),
+        "client_idle_timeout" => String.to_integer(System.get_env("POOLER_CLIENT_IDLE_TIMEOUT", "0")),
+        "client_heartbeat_interval" => String.to_integer(System.get_env("POOLER_CLIENT_HEARTBEAT_INTERVAL", "60")),
         "default_parameter_status" => %{"server_version" => version},
         "users" => [%{
           "db_user" => "pgbouncer",
           "db_password" => System.get_env("POSTGRES_PASSWORD"),
           "mode_type" => System.get_env("POOLER_POOL_MODE"),
           "pool_size" => System.get_env("POOLER_DEFAULT_POOL_SIZE"),
+          "pool_checkout_timeout" => String.to_integer(System.get_env("POOLER_POOL_CHECKOUT_TIMEOUT", "60000")),
           "is_manager" => true
         }]
       }
@@ -886,6 +889,11 @@ services:
 
       SNIPPETS_MANAGEMENT_FOLDER: /app/snippets
       EDGE_FUNCTIONS_MANAGEMENT_FOLDER: /app/edge-functions
+    logging:
+      driver: json-file
+      options:
+        max-size: ${LOG_MAX_SIZE:-10m}
+        max-file: ${LOG_MAX_FILE:-3}
 
   kong:
     container_name: ${CONTAINER_PREFIX}-kong
@@ -904,6 +912,11 @@ services:
     networks:
       - default
       - dokploy-network
+    healthcheck:
+      test: ["CMD", "kong", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
     configs:
       - source: kong_config
         target: /home/kong/temp.yml
@@ -924,6 +937,11 @@ services:
       DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD}
     # https://unix.stackexchange.com/a/294837
     entrypoint: bash -c 'eval "echo \"$$(cat ~/temp.yml)\"" > ~/kong.yml && /docker-entrypoint.sh kong docker-start'
+    logging:
+      driver: json-file
+      options:
+        max-size: ${LOG_MAX_SIZE:-10m}
+        max-file: ${LOG_MAX_FILE:-3}
 
   auth:
     container_name: ${CONTAINER_PREFIX}-auth
@@ -957,6 +975,7 @@ services:
 
       GOTRUE_DB_DRIVER: postgres
       GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
+      GOTRUE_DB_MAX_POOL_SIZE: ${GOTRUE_DB_POOL:-15}
 
       GOTRUE_SITE_URL: ${SITE_URL}
       GOTRUE_URI_ALLOW_LIST: ${ADDITIONAL_REDIRECT_URLS}
@@ -964,7 +983,6 @@ services:
 
       GOTRUE_JWT_ADMIN_ROLES: service_role
       GOTRUE_JWT_AUD: authenticated
-      GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
       GOTRUE_JWT_EXP: ${JWT_EXPIRY}
       GOTRUE_JWT_SECRET: ${JWT_SECRET}
 
@@ -990,6 +1008,11 @@ services:
 
       GOTRUE_EXTERNAL_PHONE_ENABLED: ${ENABLE_PHONE_SIGNUP}
       GOTRUE_SMS_AUTOCONFIRM: ${ENABLE_PHONE_AUTOCONFIRM}
+    logging:
+      driver: json-file
+      options:
+        max-size: ${LOG_MAX_SIZE:-10m}
+        max-file: ${LOG_MAX_FILE:-3}
 
   rest:
     container_name: ${CONTAINER_PREFIX}-rest
@@ -1009,10 +1032,14 @@ services:
       PGRST_DB_USE_LEGACY_GUCS: "false"
       PGRST_APP_SETTINGS_JWT_SECRET: ${JWT_SECRET}
       PGRST_APP_SETTINGS_JWT_EXP: ${JWT_EXPIRY}
-    command:
-      [
-        "postgrest"
-      ]
+      PGRST_DB_POOL: ${PGRST_DB_POOL:-15}
+      PGRST_DB_POOL_ACQUISITION_TIMEOUT: ${PGRST_DB_POOL_TIMEOUT:-10}
+    command: ["postgrest"]
+    logging:
+      driver: json-file
+      options:
+        max-size: ${LOG_MAX_SIZE:-10m}
+        max-file: ${LOG_MAX_FILE:-3}
 
   realtime:
     # This container name looks inconsistent but is correct because realtime constructs tenant id by parsing the subdomain
@@ -1042,17 +1069,28 @@ services:
       DB_USER: supabase_admin
       DB_PASSWORD: ${POSTGRES_PASSWORD}
       DB_NAME: ${POSTGRES_DB}
-      DB_AFTER_CONNECT_QUERY: 'SET search_path TO _realtime'
-      DB_ENC_KEY: supabaserealtime
+      DB_AFTER_CONNECT_QUERY: "SET search_path TO _realtime"
+      DB_ENC_KEY: ${REALTIME_DB_ENC_KEY}
       API_JWT_SECRET: ${JWT_SECRET}
       SECRET_KEY_BASE: ${SECRET_KEY_BASE}
       ERL_AFLAGS: -proto_dist inet_tcp
       DNS_NODES: "''"
       RLIMIT_NOFILE: "10000"
       APP_NAME: realtime
+      REGION: us-east-1
       SEED_SELF_HOST: "true"
       RUN_JANITOR: "true"
+      # Realtime scaling
+      TENANT_MAX_CONCURRENT_USERS: ${RT_MAX_CONCURRENT_USERS:-200}
+      TENANT_MAX_EVENTS_PER_SECOND: ${RT_MAX_EVENTS_PER_SECOND:-500}
+      TENANT_MAX_JOINS_PER_SECOND: ${RT_MAX_JOINS_PER_SECOND:-100}
+      TENANT_MAX_BYTES_PER_SECOND: ${RT_MAX_BYTES_PER_SECOND:-100000}
       DISABLE_HEALTHCHECK_LOGGING: "true"
+    logging:
+      driver: json-file
+      options:
+        max-size: ${LOG_MAX_SIZE:-10m}
+        max-file: ${LOG_MAX_FILE:-3}
 
   # To use S3 backed storage: docker compose -f docker-compose.yml -f docker-compose.s3.yml up
   storage:
@@ -1098,6 +1136,11 @@ services:
       ENABLE_IMAGE_TRANSFORMATION: "true"
       IMGPROXY_URL: http://imgproxy:5001
       REQUEST_ALLOW_X_FORWARDED_PATH: "true"
+    logging:
+      driver: json-file
+      options:
+        max-size: ${LOG_MAX_SIZE:-10m}
+        max-file: ${LOG_MAX_FILE:-3}
 
   imgproxy:
     container_name: ${CONTAINER_PREFIX}-imgproxy
@@ -1121,6 +1164,11 @@ services:
       IMGPROXY_USE_ETAG: "true"
       IMGPROXY_ENABLE_WEBP_DETECTION: ${IMGPROXY_ENABLE_WEBP_DETECTION}
       IMGPROXY_MAX_SRC_RESOLUTION: "16.8"
+    logging:
+      driver: json-file
+      options:
+        max-size: ${LOG_MAX_SIZE:-10m}
+        max-file: ${LOG_MAX_FILE:-3}
 
   meta:
     container_name: ${CONTAINER_PREFIX}-meta
@@ -1140,6 +1188,11 @@ services:
       PG_META_DB_USER: supabase_admin
       PG_META_DB_PASSWORD: ${POSTGRES_PASSWORD}
       CRYPTO_KEY: ${PG_META_CRYPTO_KEY}
+    logging:
+      driver: json-file
+      options:
+        max-size: ${LOG_MAX_SIZE:-10m}
+        max-file: ${LOG_MAX_FILE:-3}
 
   analytics:
     container_name: ${CONTAINER_PREFIX}-analytics
@@ -1180,6 +1233,11 @@ services:
       POSTGRES_BACKEND_URL: postgresql://supabase_admin:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/_supabase
       POSTGRES_BACKEND_SCHEMA: _analytics
       LOGFLARE_FEATURE_FLAG_OVERRIDE: multibackend=true
+    logging:
+      driver: json-file
+      options:
+        max-size: ${LOG_MAX_SIZE:-10m}
+        max-file: ${LOG_MAX_FILE:-3}
 
   # One-shot init: copies image default config files to the bind mount on first deploy.
   # Required because bind mounts hide the image's /etc/postgresql-custom/ files
@@ -1207,6 +1265,7 @@ services:
     container_name: ${CONTAINER_PREFIX}-db
     image: supabase/postgres:17.6.1.081
     restart: unless-stopped
+    shm_size: ${PG_SHM_SIZE:-2g}
     ports:
       - ${POSTGRES_DIRECT_PORT:-5435}:${POSTGRES_PORT}
     networks:
@@ -1260,14 +1319,62 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
       JWT_SECRET: ${JWT_SECRET}
       JWT_EXP: ${JWT_EXPIRY}
-    command:
-      [
+    command: [
         "postgres",
         "-c",
         "config_file=/etc/postgresql/postgresql.conf",
         "-c",
-        "log_min_messages=fatal" # prevents Realtime polling queries from appearing in logs
+        "log_min_messages=fatal",
+        # ── Memory ──
+        "-c",
+        "shared_buffers=${PG_SHARED_BUFFERS:-1GB}",
+        "-c",
+        "effective_cache_size=${PG_EFFECTIVE_CACHE_SIZE:-3GB}",
+        "-c",
+        "work_mem=${PG_WORK_MEM:-4MB}",
+        "-c",
+        "maintenance_work_mem=${PG_MAINTENANCE_WORK_MEM:-256MB}",
+        "-c",
+        "autovacuum_work_mem=${PG_AUTOVACUUM_WORK_MEM:-64MB}",
+        # ── WAL & Checkpoints ──
+        "-c",
+        "wal_buffers=${PG_WAL_BUFFERS:-16MB}",
+        "-c",
+        "checkpoint_completion_target=${PG_CHECKPOINT_COMPLETION:-0.9}",
+        "-c",
+        "min_wal_size=${PG_MIN_WAL_SIZE:-512MB}",
+        "-c",
+        "max_wal_size=${PG_MAX_WAL_SIZE:-2GB}",
+        # ── NVMe SSD Optimization ──
+        "-c",
+        "random_page_cost=${PG_RANDOM_PAGE_COST:-1.1}",
+        "-c",
+        "effective_io_concurrency=${PG_EFFECTIVE_IO_CONCURRENCY:-200}",
+        "-c",
+        "maintenance_io_concurrency=${PG_MAINTENANCE_IO_CONCURRENCY:-200}",
+        # ── Connections ──
+        "-c",
+        "max_connections=${PG_MAX_CONNECTIONS:-200}",
+        # ── Parallelism ──
+        "-c",
+        "max_worker_processes=${PG_MAX_WORKER_PROCESSES:-4}",
+        "-c",
+        "max_parallel_workers=${PG_MAX_PARALLEL_WORKERS:-4}",
+        "-c",
+        "max_parallel_workers_per_gather=${PG_MAX_PARALLEL_WORKERS_PER_GATHER:-2}",
+        "-c",
+        "max_parallel_maintenance_workers=${PG_MAX_PARALLEL_MAINTENANCE_WORKERS:-2}",
+        # ── Misc ──
+        "-c",
+        "huge_pages=${PG_HUGE_PAGES:-try}",
+        "-c",
+        "default_statistics_target=${PG_DEFAULT_STATISTICS_TARGET:-100}",
       ]
+    logging:
+      driver: json-file
+      options:
+        max-size: ${LOG_MAX_SIZE:-10m}
+        max-file: ${LOG_MAX_FILE:-3}
 
   vector:
     container_name: ${CONTAINER_PREFIX}-vector
@@ -1300,6 +1407,132 @@ services:
       ]
     security_opt:
       - "label=disable"
+    logging:
+      driver: json-file
+      options:
+        max-size: ${LOG_MAX_SIZE:-10m}
+        max-file: ${LOG_MAX_FILE:-3}
+
+  functions-init:
+    container_name: ${CONTAINER_PREFIX}-functions-init
+    image: alpine:3.19
+    restart: "no"
+    volumes:
+      - ../files/volumes/functions:/home/deno/functions:Z
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        if [ ! -f /home/deno/functions/main/index.ts ]; then
+          echo "First run: creating edge functions entrypoint..."
+          mkdir -p /home/deno/functions/main
+          mkdir -p /home/deno/functions/hello
+          cat > /home/deno/functions/main/index.ts << 'ENDOFFILE'
+        import * as jose from 'https://deno.land/x/jose@v4.14.4/index.ts'
+
+        console.log('main function started')
+
+        const JWT_SECRET = Deno.env.get('JWT_SECRET')
+        const VERIFY_JWT = Deno.env.get('VERIFY_JWT') === 'true'
+
+        function getAuthToken(req: Request) {
+          const authHeader = req.headers.get('authorization')
+          if (!authHeader) {
+            throw new Error('Missing authorization header')
+          }
+          const [bearer, token] = authHeader.split(' ')
+          if (bearer !== 'Bearer') {
+            throw new Error(`Auth header is not 'Bearer {token}'`)
+          }
+          return token
+        }
+
+        async function verifyJWT(jwt: string): Promise<boolean> {
+          const encoder = new TextEncoder()
+          const secretKey = encoder.encode(JWT_SECRET)
+          try {
+            await jose.jwtVerify(jwt, secretKey)
+          } catch (err) {
+            console.error(err)
+            return false
+          }
+          return true
+        }
+
+        Deno.serve(async (req: Request) => {
+          if (req.method !== 'OPTIONS' && VERIFY_JWT) {
+            try {
+              const token = getAuthToken(req)
+              const isValidJWT = await verifyJWT(token)
+
+              if (!isValidJWT) {
+                return new Response(JSON.stringify({ msg: 'Invalid JWT' }), {
+                  status: 401,
+                  headers: { 'Content-Type': 'application/json' },
+                })
+              }
+            } catch (e) {
+              console.error(e)
+              return new Response(JSON.stringify({ msg: e.toString() }), {
+                status: 401,
+                headers: { 'Content-Type': 'application/json' },
+              })
+            }
+          }
+
+          const url = new URL(req.url)
+          const { pathname } = url
+          const path_parts = pathname.split('/')
+          const service_name = path_parts[1]
+
+          if (!service_name || service_name === '') {
+            const error = { msg: 'missing function name in request' }
+            return new Response(JSON.stringify(error), {
+              status: 400,
+              headers: { 'Content-Type': 'application/json' },
+            })
+          }
+
+          const servicePath = `/home/deno/functions/$${service_name}`
+          console.error(`serving the request with $${servicePath}`)
+
+          const memoryLimitMb = parseInt(Deno.env.get('FUNCTIONS_WORKER_MEMORY_MB') || '512')
+          const workerTimeoutMs = parseInt(Deno.env.get('FUNCTIONS_WORKER_TIMEOUT_MS') || '300000')
+          const noModuleCache = false
+          const importMapPath = null
+          const envVarsObj = Deno.env.toObject()
+          const envVars = Object.keys(envVarsObj).map((k) => [k, envVarsObj[k]])
+
+          try {
+            const worker = await EdgeRuntime.userWorkers.create({
+              servicePath,
+              memoryLimitMb,
+              workerTimeoutMs,
+              noModuleCache,
+              importMapPath,
+              envVars,
+            })
+            return await worker.fetch(req)
+          } catch (e) {
+            const error = { msg: e.toString() }
+            return new Response(JSON.stringify(error), {
+              status: 500,
+              headers: { 'Content-Type': 'application/json' },
+            })
+          }
+        })
+        ENDOFFILE
+          cat > /home/deno/functions/hello/index.ts << 'ENDOFFILE'
+        Deno.serve(async () => {
+          return new Response(
+            `"Hello from Edge Functions!"`,
+            { headers: { "Content-Type": "application/json" } },
+          )
+        })
+        ENDOFFILE
+          echo "Done."
+        else
+          echo "Functions directory already populated, skipping."
+        fi
 
   functions:
     container_name: ${CONTAINER_PREFIX}-functions
@@ -1310,19 +1543,23 @@ services:
     depends_on:
       analytics:
         condition: service_healthy
+      functions-init:
+        condition: service_completed_successfully
     environment:
       JWT_SECRET: ${JWT_SECRET}
       SUPABASE_URL: http://kong:8000
       SUPABASE_ANON_KEY: ${ANON_KEY}
       SUPABASE_SERVICE_ROLE_KEY: ${SERVICE_ROLE_KEY}
-      SUPABASE_DB_URL: postgresql://postgres:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
+      SUPABASE_DB_URL: postgresql://postgres.${POOLER_TENANT_ID}:${POSTGRES_PASSWORD}@supavisor:6543/${POSTGRES_DB}
       VERIFY_JWT: "${FUNCTIONS_VERIFY_JWT}"
-    command:
-      [
-        "start",
-        "--main-service",
-        "/home/deno/functions/main"
-      ]
+      FUNCTIONS_WORKER_MEMORY_MB: "${FUNCTIONS_WORKER_MEMORY_MB:-512}"
+      FUNCTIONS_WORKER_TIMEOUT_MS: "${FUNCTIONS_WORKER_TIMEOUT_MS:-300000}"
+    command: ["start", "--main-service", "/home/deno/functions/main", "--policy", "per_worker"]
+    logging:
+      driver: json-file
+      options:
+        max-size: ${LOG_MAX_SIZE:-10m}
+        max-file: ${LOG_MAX_FILE:-3}
 
   # Update the DATABASE_URL if you are using an external Postgres database
   supavisor:
@@ -1369,7 +1606,7 @@ services:
       API_JWT_SECRET: ${JWT_SECRET}
       METRICS_JWT_SECRET: ${JWT_SECRET}
       REGION: local
-      ERL_AFLAGS: -proto_dist inet_tcp
+      ERL_AFLAGS: -proto_dist inet_tcp +K true +SDio 4 +sbwt none +sbwtdcpu none +sbwtdio none
       POOLER_TENANT_ID: ${POOLER_TENANT_ID}
       POOLER_DEFAULT_POOL_SIZE: ${POOLER_DEFAULT_POOL_SIZE}
       POOLER_MAX_CLIENT_CONN: ${POOLER_MAX_CLIENT_CONN}
@@ -1381,6 +1618,11 @@ services:
         "-c",
         "/app/bin/migrate && /app/bin/supavisor eval \"$$(cat /etc/pooler/pooler.exs)\" && /app/bin/server"
       ]
+    logging:
+      driver: json-file
+      options:
+        max-size: ${LOG_MAX_SIZE:-10m}
+        max-file: ${LOG_MAX_FILE:-3}
 
 networks:
   dokploy-network:

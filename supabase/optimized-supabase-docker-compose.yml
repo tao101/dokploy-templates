@@ -991,7 +991,6 @@ services:
 
       GOTRUE_JWT_ADMIN_ROLES: service_role
       GOTRUE_JWT_AUD: authenticated
-      GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
       GOTRUE_JWT_EXP: ${JWT_EXPIRY}
       GOTRUE_JWT_SECRET: ${JWT_SECRET}
 
@@ -1400,23 +1399,151 @@ services:
         max-size: ${LOG_MAX_SIZE:-10m}
         max-file: ${LOG_MAX_FILE:-3}
 
+  functions-init:
+    container_name: ${CONTAINER_PREFIX}-functions-init
+    image: alpine:3.19
+    restart: "no"
+    volumes:
+      - ../files/volumes/functions:/home/deno/functions:Z
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        if [ ! -f /home/deno/functions/main/index.ts ]; then
+          echo "First run: creating edge functions entrypoint..."
+          mkdir -p /home/deno/functions/main
+          mkdir -p /home/deno/functions/hello
+          cat > /home/deno/functions/main/index.ts << 'ENDOFFILE'
+        import * as jose from 'https://deno.land/x/jose@v4.14.4/index.ts'
+
+        console.log('main function started')
+
+        const JWT_SECRET = Deno.env.get('JWT_SECRET')
+        const VERIFY_JWT = Deno.env.get('VERIFY_JWT') === 'true'
+
+        function getAuthToken(req: Request) {
+          const authHeader = req.headers.get('authorization')
+          if (!authHeader) {
+            throw new Error('Missing authorization header')
+          }
+          const [bearer, token] = authHeader.split(' ')
+          if (bearer !== 'Bearer') {
+            throw new Error(`Auth header is not 'Bearer {token}'`)
+          }
+          return token
+        }
+
+        async function verifyJWT(jwt: string): Promise<boolean> {
+          const encoder = new TextEncoder()
+          const secretKey = encoder.encode(JWT_SECRET)
+          try {
+            await jose.jwtVerify(jwt, secretKey)
+          } catch (err) {
+            console.error(err)
+            return false
+          }
+          return true
+        }
+
+        Deno.serve(async (req: Request) => {
+          if (req.method !== 'OPTIONS' && VERIFY_JWT) {
+            try {
+              const token = getAuthToken(req)
+              const isValidJWT = await verifyJWT(token)
+
+              if (!isValidJWT) {
+                return new Response(JSON.stringify({ msg: 'Invalid JWT' }), {
+                  status: 401,
+                  headers: { 'Content-Type': 'application/json' },
+                })
+              }
+            } catch (e) {
+              console.error(e)
+              return new Response(JSON.stringify({ msg: e.toString() }), {
+                status: 401,
+                headers: { 'Content-Type': 'application/json' },
+              })
+            }
+          }
+
+          const url = new URL(req.url)
+          const { pathname } = url
+          const path_parts = pathname.split('/')
+          const service_name = path_parts[1]
+
+          if (!service_name || service_name === '') {
+            const error = { msg: 'missing function name in request' }
+            return new Response(JSON.stringify(error), {
+              status: 400,
+              headers: { 'Content-Type': 'application/json' },
+            })
+          }
+
+          const servicePath = `/home/deno/functions/$${service_name}`
+          console.error(`serving the request with $${servicePath}`)
+
+          const memoryLimitMb = parseInt(Deno.env.get('FUNCTIONS_WORKER_MEMORY_MB') || '512')
+          const workerTimeoutMs = parseInt(Deno.env.get('FUNCTIONS_WORKER_TIMEOUT_MS') || '300000')
+          const noModuleCache = false
+          const importMapPath = null
+          const envVarsObj = Deno.env.toObject()
+          const envVars = Object.keys(envVarsObj).map((k) => [k, envVarsObj[k]])
+
+          try {
+            const worker = await EdgeRuntime.userWorkers.create({
+              servicePath,
+              memoryLimitMb,
+              workerTimeoutMs,
+              noModuleCache,
+              importMapPath,
+              envVars,
+            })
+            return await worker.fetch(req)
+          } catch (e) {
+            const error = { msg: e.toString() }
+            return new Response(JSON.stringify(error), {
+              status: 500,
+              headers: { 'Content-Type': 'application/json' },
+            })
+          }
+        })
+        ENDOFFILE
+          cat > /home/deno/functions/hello/index.ts << 'ENDOFFILE'
+        Deno.serve(async () => {
+          return new Response(
+            `"Hello from Edge Functions!"`,
+            { headers: { "Content-Type": "application/json" } },
+          )
+        })
+        ENDOFFILE
+          echo "Done."
+        else
+          echo "Functions directory already populated, skipping."
+        fi
+
   functions:
     container_name: ${CONTAINER_PREFIX}-functions
     image: supabase/edge-runtime:v1.70.0
     restart: unless-stopped
     volumes:
       - ../files/volumes/functions:/home/deno/functions:Z
+    env_file:
+      - path: ../files/.env.functions
+        required: false
     depends_on:
       analytics:
         condition: service_healthy
+      functions-init:
+        condition: service_completed_successfully
     environment:
       JWT_SECRET: ${JWT_SECRET}
       SUPABASE_URL: http://kong:8000
       SUPABASE_ANON_KEY: ${ANON_KEY}
       SUPABASE_SERVICE_ROLE_KEY: ${SERVICE_ROLE_KEY}
-      SUPABASE_DB_URL: postgresql://postgres:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
+      SUPABASE_DB_URL: postgresql://postgres.${POOLER_TENANT_ID}:${POSTGRES_PASSWORD}@supavisor:6543/${POSTGRES_DB}
       VERIFY_JWT: "${FUNCTIONS_VERIFY_JWT}"
-    command: ["start", "--main-service", "/home/deno/functions/main"]
+      FUNCTIONS_WORKER_MEMORY_MB: "${FUNCTIONS_WORKER_MEMORY_MB:-512}"
+      FUNCTIONS_WORKER_TIMEOUT_MS: "${FUNCTIONS_WORKER_TIMEOUT_MS:-300000}"
+    command: ["start", "--main-service", "/home/deno/functions/main", "--policy", "per_worker"]
     logging:
       driver: json-file
       options:
