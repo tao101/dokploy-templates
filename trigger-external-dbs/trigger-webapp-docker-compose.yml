@@ -68,7 +68,7 @@ services:
     environment:
       # Batch Queue - prevents stuck batches from leaked concurrency tokens
       BATCH_QUEUE_SHARD_COUNT: 2
-      BATCH_CONCURRENCY_LIMIT_DEFAULT: 10
+      BATCH_CONCURRENCY_LIMIT_DEFAULT: 100
       BATCH_QUEUE_CONSUMER_COUNT: 5
       BATCH_QUEUE_CONSUMER_INTERVAL_MS: 100
       # Run Engine - Scaled for heavy worker polling
@@ -84,8 +84,8 @@ services:
       DEFAULT_ENV_EXECUTION_CONCURRENCY_LIMIT: 1000
       DEFAULT_ORG_EXECUTION_CONCURRENCY_LIMIT: 3000
       WORKER_CONCURRENCY: 50
-      MAXIMUM_DEV_QUEUE_SIZE: 30000
-      MAXIMUM_DEPLOYED_QUEUE_SIZE: 150000
+      MAXIMUM_DEV_QUEUE_SIZE: 100000
+      MAXIMUM_DEPLOYED_QUEUE_SIZE: 1000000
       # Queue processing optimization (faster polling for heavy worker load)
       MASTER_QUEUE_CONSUMERS_INTERVAL_MS: 250
       MASTER_QUEUE_CONSUMER_DEQUEUE_COUNT: 50
