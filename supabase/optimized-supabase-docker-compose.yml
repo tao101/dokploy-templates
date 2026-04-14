@@ -1,4 +1,4 @@
-# Production-optimized Supabase for Hetzner CCX33 (8 vCPU, 32GB RAM, NVMe SSD)
+# Production-optimized Supabase for Hetzner (16 vCPU, 64GB RAM, NVMe SSD)
 #
 # Usage:
 #   Start:    docker compose -f optimized-supabase-docker-compose.yml --env-file optimized-supabase.env up -d
@@ -1595,7 +1595,7 @@ services:
       API_JWT_SECRET: ${JWT_SECRET}
       METRICS_JWT_SECRET: ${JWT_SECRET}
       REGION: local
-      ERL_AFLAGS: -proto_dist inet_tcp +K true +SDio 8 +sbwt none +sbwtdcpu none +sbwtdio none
+      ERL_AFLAGS: -proto_dist inet_tcp +K true +SDio 16 +sbwt none +sbwtdcpu none +sbwtdio none
       POOLER_TENANT_ID: ${POOLER_TENANT_ID}
       POOLER_DEFAULT_POOL_SIZE: ${POOLER_DEFAULT_POOL_SIZE}
       POOLER_MAX_CLIENT_CONN: ${POOLER_MAX_CLIENT_CONN}

@@ -13,7 +13,7 @@ This guide walks you through deploying a self-hosted Supabase instance on Dokplo
 | Variant | File | Best for |
 |---------|------|----------|
 | **Standard** | `supabase-docker-compose.yml` + `supabase.env` | Dev, staging, or small production on any server |
-| **Optimized** | `optimized-supabase-docker-compose.yml` + `optimized-supabase.env` | Production on Hetzner CCX33 or similar 8-core/32GB dedicated servers |
+| **Optimized** | `optimized-supabase-docker-compose.yml` + `optimized-supabase.env` | Production on Hetzner or similar 16-core/64GB dedicated servers |
 
 If unsure, start with **Standard**. You can switch later by replacing the compose and env files.
 
@@ -144,12 +144,12 @@ Sign both with HS256 using your `JWT_SECRET`. You can use [jwt.io](https://jwt.i
 
 ### Optimized Variant Only
 
-If using the optimized variant, also review these (defaults are tuned for CCX33):
+If using the optimized variant, also review these (defaults are tuned for 16 vCPU / 64GB):
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `PG_SHARED_BUFFERS` | `6GB` | 25% of RAM |
-| `PG_EFFECTIVE_CACHE_SIZE` | `18GB` | 75% of RAM |
+| `PG_SHARED_BUFFERS` | `16GB` | 25% of RAM |
+| `PG_EFFECTIVE_CACHE_SIZE` | `48GB` | 75% of RAM |
 | `PG_MAX_CONNECTIONS` | `500` | Max direct PG connections |
 | `POOLER_DEFAULT_POOL_SIZE` | `300` | Backend connections per tenant |
 | `POOLER_MAX_CLIENT_CONN` | `2000` | Max client connections via Supavisor |

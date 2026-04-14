@@ -1,10 +1,10 @@
-# Kernel Tuning Notes for Hetzner CCX33 (Supabase Production)
+# Kernel Tuning Notes for Hetzner (16 vCPU, 64GB RAM - Supabase Production)
 
 > **Run [`../SERVER-SETUP.md`](../SERVER-SETUP.md) first.** It covers all base kernel tuning (sysctl params, file descriptors, swap, Docker daemon tuning, firewall, NTP). This file covers Supabase-specific sysctl values and the post-deployment validation checklist.
 
 These are optional host-level optimizations. The optimized docker-compose works without them, but applying these can improve performance further.
 
-**All commands require sudo.**
+**All commands require sudo.** Values below are tuned for 16 vCPU / 64GB RAM.
 
 ## Sysctl Settings
 
@@ -29,9 +29,9 @@ sysctl -w net.ipv4.tcp_keepalive_probes=6      # Give up after 6 probes (default
 # Connection reuse — recycle TIME_WAIT sockets faster under high churn
 sysctl -w net.ipv4.tcp_tw_reuse=1
 
-# Huge pages for PostgreSQL shared_buffers (6GB / 2MB per page = 3072 pages)
+# Huge pages for PostgreSQL shared_buffers (16GB / 2MB per page = 8192 pages)
 # Only useful if PG_HUGE_PAGES=on (currently set to 'try')
-sysctl -w vm.nr_hugepages=3072
+sysctl -w vm.nr_hugepages=8192
 ```
 
 To persist across reboots, add to `/etc/sysctl.conf`:
@@ -45,12 +45,12 @@ net.ipv4.tcp_keepalive_time=60
 net.ipv4.tcp_keepalive_intvl=10
 net.ipv4.tcp_keepalive_probes=6
 net.ipv4.tcp_tw_reuse=1
-vm.nr_hugepages=3072
+vm.nr_hugepages=8192
 ```
 
 ## Disable Swap (Recommended)
 
-PostgreSQL on swap is catastrophically slow. On a dedicated server with 32GB RAM:
+PostgreSQL on swap is catastrophically slow. On a dedicated server with 64GB RAM:
 
 ```bash
 swapoff -a
