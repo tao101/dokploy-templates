@@ -96,7 +96,7 @@ services:
     restart: unless-stopped
     ports:
       - "6379:6379"
-    # Optimized for 8 vCPU / 32GB RAM - doubled resources for heavy worker polling
+    # Optimized for 8 vCPU / 16GB RAM - tuned for shared server
     command: >-
       redis-server
       --requirepass ${REDIS_PASSWORD}
@@ -137,8 +137,8 @@ services:
       DATABASE_URL: "postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-trigger}?schema=public&sslmode=disable"
       ELECTRIC_SECRET: "${ELECTRIC_SECRET}"
       ELECTRIC_USAGE_REPORTING: "false"
-      # Scaled pool size for heavy worker polling (8 vCPU / 32GB RAM)
-      ELECTRIC_DB_POOL_SIZE: 600
+      # Pool size budgeted for 8 vCPU / 16GB RAM (PG max_connections=550)
+      ELECTRIC_DB_POOL_SIZE: 200
 
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3000/v1/health"]
@@ -166,7 +166,7 @@ services:
       CLICKHOUSE_USER: ${CLICKHOUSE_ADMIN_USER:-default}
       CLICKHOUSE_PASSWORD: "${CLICKHOUSE_PASSWORD}"
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
-    # Inline config creation - Optimized for 8 vCPU / 32GB RAM
+    # Inline config creation - Optimized for 8 vCPU / 16GB RAM
     command:
       - /bin/bash
       - -c
@@ -182,12 +182,12 @@ services:
                 <level>warning</level>
             </logger>
 
-            <!-- Memory settings - capped at 50% RAM (shared server with PG, Redis, etc.) -->
-            <mark_cache_size>4294967296</mark_cache_size> <!-- 4GB -->
-            <uncompressed_cache_size>6442450944</uncompressed_cache_size> <!-- 6GB -->
-            <max_server_memory_usage_to_ram_ratio>0.5</max_server_memory_usage_to_ram_ratio>
+            <!-- Memory settings - capped at 30% RAM (shared 16GB server with PG, Redis, etc.) -->
+            <mark_cache_size>1610612736</mark_cache_size> <!-- 1.5GB -->
+            <uncompressed_cache_size>2147483648</uncompressed_cache_size> <!-- 2GB -->
+            <max_server_memory_usage_to_ram_ratio>0.3</max_server_memory_usage_to_ram_ratio>
 
-            <!-- Concurrency settings - DOUBLED for 8 vCPU (heavy worker polling) -->
+            <!-- Concurrency settings for 8 vCPU -->
             <max_concurrent_queries>300</max_concurrent_queries>
             <concurrent_threads_soft_limit_num>8</concurrent_threads_soft_limit_num>
             <background_pool_size>32</background_pool_size>

@@ -2,7 +2,7 @@
 
 > **Run [`../SERVER-SETUP.md`](../SERVER-SETUP.md) first.** It covers system updates, Dokploy install, Docker daemon tuning, kernel parameters, file descriptors, swap, firewall, and NTP. Then come back here for database-specific tuning.
 
-Run these commands on the dedicated database server (8 vCPU / 32GB RAM). This server runs: postgres, redis, clickhouse, electric, minio.
+Run these commands on the dedicated database server (8 vCPU / 16GB RAM). This server runs: postgres, redis, clickhouse, electric, minio.
 
 All commands require `sudo`.
 
@@ -71,8 +71,8 @@ sudo sed -i '/\sswap\s/s/^/#/' /etc/fstab
 Improves shared_buffers performance. Uncomment and run ONE line matching your `PG_SHARED_BUFFERS`:
 
 ```bash
-# sudo sysctl -w vm.nr_hugepages=2048    # 4GB shared_buffers
-sudo sysctl -w vm.nr_hugepages=4096      # 8GB shared_buffers (Tier 2 default)
+sudo sysctl -w vm.nr_hugepages=2048      # 4GB shared_buffers (active config)
+# sudo sysctl -w vm.nr_hugepages=4096    # 8GB shared_buffers
 # sudo sysctl -w vm.nr_hugepages=8192    # 16GB shared_buffers
 # sudo sysctl -w vm.nr_hugepages=16384   # 32GB shared_buffers
 ```
@@ -80,7 +80,7 @@ sudo sysctl -w vm.nr_hugepages=4096      # 8GB shared_buffers (Tier 2 default)
 If you enable huge pages, also add to `/etc/sysctl.conf`:
 
 ```bash
-echo "vm.nr_hugepages=4096" | sudo tee -a /etc/sysctl.conf
+echo "vm.nr_hugepages=2048" | sudo tee -a /etc/sysctl.conf
 ```
 
 ## 6. Firewall — Restrict Database Ports
