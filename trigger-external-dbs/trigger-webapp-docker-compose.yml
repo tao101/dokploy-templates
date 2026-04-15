@@ -32,7 +32,7 @@
 
 services:
   trigger:
-    image: "ghcr.io/triggerdotdev/trigger.dev@sha256:b208b821aebeafe1e814618e92009e104bcb66d7b67d9aee580f5b12ce9391ca"
+    image: "ghcr.io/triggerdotdev/trigger.dev:v4.4.4"
     user: root
     stop_grace_period: 35s
     command: |
@@ -80,7 +80,7 @@ services:
       RUN_ENGINE_RATE_LIMIT_REFILL_RATE: 3000
       API_RATE_LIMIT_MAX: 5000
       API_RATE_LIMIT_REFILL_RATE: 2000
-      DATABASE_CONNECTION_LIMIT: 1500
+      DATABASE_CONNECTION_LIMIT: 150
       DEFAULT_ENV_EXECUTION_CONCURRENCY_LIMIT: 1000
       DEFAULT_ORG_EXECUTION_CONCURRENCY_LIMIT: 3000
       WORKER_CONCURRENCY: 50
@@ -143,20 +143,28 @@ services:
       RUN_REPLICATION_LOG_LEVEL: info
       APP_LOG_LEVEL: info
       TRIGGER_TELEMETRY_DISABLED: 0
-      # ── Optional features ──
-      # To enable email login, add these lines to the environment section:
-      #   WHITELISTED_EMAILS: "user@example.com"
-      #   EMAIL_TRANSPORT: "resend"        # resend | smtp | aws-ses
-      #   FROM_EMAIL: "noreply@yourdomain.com"
-      #   RESEND_API_KEY: "re_xxxxxxxxxxxx"
-      #   ALERT_EMAIL_TRANSPORT: "resend"
-      #   ALERT_FROM_EMAIL: "noreply@yourdomain.com"
-      #   ALERT_RESEND_API_KEY: "re_xxxxxxxxxxxx"
-      # To enable Slack integration:
-      #   ORG_SLACK_INTEGRATION_CLIENT_ID: "your-client-id"
-      #   ORG_SLACK_INTEGRATION_CLIENT_SECRET: "your-client-secret"
-      # To auto-promote admins:
-      #   ADMIN_EMAILS: ".*@yourcompany\\.com"
+      # ── Email (SMTP via Mailjet) ──
+      WHITELISTED_EMAILS: ".*@yourcompany\\.com"
+      EMAIL_TRANSPORT: "smtp"
+      FROM_EMAIL: "noreply@yourdomain.com"
+      SMTP_HOST: "in-v3.mailjet.com"
+      SMTP_PORT: "587"
+      SMTP_USER: "${SMTP_USER}"
+      SMTP_PASSWORD: "${SMTP_PASSWORD}"
+      SMTP_SENDER_NAME: "Trigger.dev"
+      ALERT_EMAIL_TRANSPORT: "smtp"
+      ALERT_FROM_EMAIL: "noreply@yourdomain.com"
+      # Dummy value required — UI checks ALERT_RESEND_API_KEY existence even for SMTP transport
+      ALERT_RESEND_API_KEY: "unused-smtp-transport"
+      ALERT_SMTP_HOST: "in-v3.mailjet.com"
+      ALERT_SMTP_PORT: "587"
+      ALERT_SMTP_USER: "${SMTP_USER}"
+      ALERT_SMTP_PASSWORD: "${SMTP_PASSWORD}"
+      # ── Slack Integration (uncomment to enable) ──
+      # ORG_SLACK_INTEGRATION_CLIENT_ID: ""
+      # ORG_SLACK_INTEGRATION_CLIENT_SECRET: ""
+      # ── Admin Auto-Promotion ──
+      ADMIN_EMAILS: ".*@yourcompany\\.com"
     volumes:
       - "shared-data:/home/node/shared"
     healthcheck:
@@ -227,7 +235,7 @@ volumes:
     driver: local
     driver_opts:
       type: nfs
-      o: "addr=${NFS_SERVER_IP:-159.69.194.213},rw,nolock,soft,nfsvers=4"
+      o: "addr=${NFS_SERVER_IP},rw,nolock,soft,nfsvers=4"
       device: ":/srv/nfs/trigger-shared"
   registry-data:
 
