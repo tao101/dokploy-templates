@@ -1,0 +1,494 @@
+# Self-hosted Baserow for Dokploy
+#
+# Standalone Docker Compose template — paste this and `baserow.env` into Dokploy
+# and deploy. No external files needed: the Caddyfile is embedded inline via the
+# `configs` block below.
+#
+# Architecture (8 containers):
+#   caddy            — internal reverse proxy (HTTP only; Dokploy/Traefik fronts TLS)
+#   backend          — Django REST API
+#   web-frontend     — Nuxt UI
+#   celery           — async task worker
+#   celery-export    — dedicated export worker
+#   celery-beat      — scheduled task dispatcher
+#   db               — PostgreSQL 15 + pgvector
+#   redis            — cache + broker
+#   (volume-fixer)   — one-shot init job that chowns the media volume
+#
+# Add a Dokploy domain pointing at the `caddy` service on port 80.
+
+name: baserow
+
+# ─────────────────────────────────────────────────────────────────────
+# Inline Caddyfile — routes requests between backend / web-frontend
+# and serves uploaded files from the shared media volume.
+# ─────────────────────────────────────────────────────────────────────
+configs:
+
+  caddyfile:
+    content: |
+      {
+          # Behind Dokploy/Traefik we do not need on-demand TLS — Traefik handles certs.
+          auto_https off
+          admin off
+          {$$BASEROW_CADDY_GLOBAL_CONF}
+      }
+
+      {$$BASEROW_CADDY_ADDRESSES} {
+          @is_baserow_tool {
+              expression `
+                  "{$$BASEROW_PUBLIC_URL}".contains({http.request.host}) ||
+                  "{$$BASEROW_EXTRA_PUBLIC_URLS}".split(",")
+                      .filter(u, u != "" && u.contains({http.request.host}))
+                      .size() > 0
+              `
+          }
+
+          handle @is_baserow_tool {
+              @backend_routes path /api/* /ws/* /mcp/* /assistant/* {$$BASEROW_CADDY_BACKEND_EXTRA_ROUTES:}
+              handle @backend_routes {
+                  reverse_proxy {$$PRIVATE_BACKEND_URL:http://backend:8000}
+              }
+
+              handle_path /media/* {
+                  @downloads {
+                      query dl=*
+                  }
+                  header @downloads Content-disposition "attachment; filename={query.dl}"
+
+                  header {
+                      Access-Control-Allow-Origin {$$BASEROW_PUBLIC_URL:http://localhost}
+                      Access-Control-Allow-Methods "GET, HEAD, OPTIONS"
+                      Access-Control-Allow-Headers "*"
+                      Access-Control-Expose-Headers "Content-Length, Content-Type"
+                  }
+
+                  file_server {
+                      root {$$MEDIA_ROOT:/baserow/media/}
+                  }
+              }
+
+              handle_path /static/* {
+                  file_server {
+                      root {$$STATIC_ROOT:/baserow/static/}
+                  }
+              }
+          }
+
+          reverse_proxy {$$PRIVATE_WEB_FRONTEND_URL:http://web-frontend:3000}
+      }
+
+# ─────────────────────────────────────────────────────────────────────
+# Anchor: every Baserow service container shares the same backend env.
+# Lets us configure 200+ Baserow knobs from `baserow.env` without
+# repeating them per-service.
+# ─────────────────────────────────────────────────────────────────────
+x-backend-variables: &backend-variables
+  SECRET_KEY: ${SECRET_KEY:?SECRET_KEY required}
+  BASEROW_JWT_SIGNING_KEY: ${BASEROW_JWT_SIGNING_KEY:-}
+  DATABASE_PASSWORD: ${DATABASE_PASSWORD:?DATABASE_PASSWORD required}
+  REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD required}
+
+  BASEROW_PUBLIC_URL: ${BASEROW_PUBLIC_URL:-http://localhost}
+  BASEROW_EXTRA_PUBLIC_URLS: ${BASEROW_EXTRA_PUBLIC_URLS:-}
+  BASEROW_EXTRA_ALLOWED_HOSTS: ${BASEROW_EXTRA_ALLOWED_HOSTS:-}
+  BASEROW_ENABLE_SECURE_PROXY_SSL_HEADER: ${BASEROW_ENABLE_SECURE_PROXY_SSL_HEADER:-}
+  BASEROW_DISABLE_PUBLIC_URL_CHECK: ${BASEROW_DISABLE_PUBLIC_URL_CHECK:-}
+
+  # Database — defaults to the bundled `db` service
+  DATABASE_USER: ${DATABASE_USER:-baserow}
+  DATABASE_NAME: ${DATABASE_NAME:-baserow}
+  DATABASE_HOST: ${DATABASE_HOST:-db}
+  DATABASE_PORT: ${DATABASE_PORT:-5432}
+  DATABASE_OPTIONS: ${DATABASE_OPTIONS:-}
+  DATABASE_URL: ${DATABASE_URL:-}
+
+  # Redis — defaults to the bundled `redis` service
+  REDIS_HOST: ${REDIS_HOST:-redis}
+  REDIS_PORT: ${REDIS_PORT:-6379}
+  REDIS_PROTOCOL: ${REDIS_PROTOCOL:-redis}
+  REDIS_URL: ${REDIS_URL:-}
+  REDIS_USER: ${REDIS_USER:-}
+
+  # Email / SMTP
+  EMAIL_SMTP: ${EMAIL_SMTP:-}
+  EMAIL_SMTP_HOST: ${EMAIL_SMTP_HOST:-}
+  EMAIL_SMTP_PORT: ${EMAIL_SMTP_PORT:-}
+  EMAIL_SMTP_USE_TLS: ${EMAIL_SMTP_USE_TLS:-}
+  EMAIL_SMTP_USE_SSL: ${EMAIL_SMTP_USE_SSL:-}
+  EMAIL_SMTP_USER: ${EMAIL_SMTP_USER:-}
+  EMAIL_SMTP_PASSWORD: ${EMAIL_SMTP_PASSWORD:-}
+  FROM_EMAIL: ${FROM_EMAIL:-}
+
+  # S3-compatible object storage (optional — leave blank to store on local volume)
+  AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+  AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+  AWS_STORAGE_BUCKET_NAME: ${AWS_STORAGE_BUCKET_NAME:-}
+  AWS_S3_REGION_NAME: ${AWS_S3_REGION_NAME:-}
+  AWS_S3_ENDPOINT_URL: ${AWS_S3_ENDPOINT_URL:-}
+  AWS_S3_CUSTOM_DOMAIN: ${AWS_S3_CUSTOM_DOMAIN:-}
+
+  # Workers & limits
+  BASEROW_AMOUNT_OF_GUNICORN_WORKERS: ${BASEROW_AMOUNT_OF_GUNICORN_WORKERS:-}
+  BASEROW_AMOUNT_OF_WORKERS: ${BASEROW_AMOUNT_OF_WORKERS:-}
+  BASEROW_RUN_MINIMAL: ${BASEROW_RUN_MINIMAL:-}
+  BASEROW_ROW_PAGE_SIZE_LIMIT: ${BASEROW_ROW_PAGE_SIZE_LIMIT:-}
+  BATCH_ROWS_SIZE_LIMIT: ${BATCH_ROWS_SIZE_LIMIT:-}
+  INITIAL_TABLE_DATA_LIMIT: ${INITIAL_TABLE_DATA_LIMIT:-}
+  BASEROW_FILE_UPLOAD_SIZE_LIMIT_MB: ${BASEROW_FILE_UPLOAD_SIZE_LIMIT_MB:-}
+  BASEROW_MAX_IMPORT_FILE_SIZE_MB: ${BASEROW_MAX_IMPORT_FILE_SIZE_MB:-}
+  BASEROW_UNIQUE_ROW_VALUES_SIZE_LIMIT: ${BASEROW_UNIQUE_ROW_VALUES_SIZE_LIMIT:-}
+
+  # Startup behaviour
+  MIGRATE_ON_STARTUP: ${MIGRATE_ON_STARTUP:-true}
+  SYNC_TEMPLATES_ON_STARTUP: ${SYNC_TEMPLATES_ON_STARTUP:-true}
+  BASEROW_TRIGGER_SYNC_TEMPLATES_AFTER_MIGRATION: ${BASEROW_TRIGGER_SYNC_TEMPLATES_AFTER_MIGRATION:-}
+
+  # Logging
+  BASEROW_BACKEND_DEBUG: ${BASEROW_BACKEND_DEBUG:-}
+  BASEROW_BACKEND_LOG_LEVEL: ${BASEROW_BACKEND_LOG_LEVEL:-INFO}
+
+  # URLs derived from BASEROW_PUBLIC_URL — leave blank to auto-derive
+  PRIVATE_BACKEND_URL: ${PRIVATE_BACKEND_URL:-http://backend:8000}
+  PUBLIC_BACKEND_URL: ${PUBLIC_BACKEND_URL:-}
+  PUBLIC_WEB_FRONTEND_URL: ${PUBLIC_WEB_FRONTEND_URL:-}
+  BASEROW_EMBEDDED_SHARE_URL: ${BASEROW_EMBEDDED_SHARE_URL:-}
+  MEDIA_URL: ${MEDIA_URL:-}
+  MEDIA_ROOT: ${MEDIA_ROOT:-/baserow/media}
+
+  # Tokens & sessions
+  BASEROW_ACCESS_TOKEN_LIFETIME_MINUTES: ${BASEROW_ACCESS_TOKEN_LIFETIME_MINUTES:-}
+  BASEROW_REFRESH_TOKEN_LIFETIME_HOURS: ${BASEROW_REFRESH_TOKEN_LIFETIME_HOURS:-}
+
+  # Throttling
+  BASEROW_MAX_CONCURRENT_USER_REQUESTS: ${BASEROW_MAX_CONCURRENT_USER_REQUESTS:-}
+  BASEROW_CONCURRENT_USER_REQUESTS_THROTTLE_TIMEOUT: ${BASEROW_CONCURRENT_USER_REQUESTS_THROTTLE_TIMEOUT:-}
+  BASEROW_SEND_VERIFY_EMAIL_RATE_LIMIT: ${BASEROW_SEND_VERIFY_EMAIL_RATE_LIMIT:-}
+
+  # Webhooks
+  BASEROW_WEBHOOKS_ALLOW_PRIVATE_ADDRESS: ${BASEROW_WEBHOOKS_ALLOW_PRIVATE_ADDRESS:-}
+  BASEROW_WEBHOOKS_MAX_RETRIES_PER_CALL: ${BASEROW_WEBHOOKS_MAX_RETRIES_PER_CALL:-}
+
+  # Optional AI integrations
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  BASEROW_OPENAI_API_KEY: ${BASEROW_OPENAI_API_KEY:-}
+  BASEROW_OPENAI_MODELS: ${BASEROW_OPENAI_MODELS:-}
+  BASEROW_ANTHROPIC_API_KEY: ${BASEROW_ANTHROPIC_API_KEY:-}
+  BASEROW_ANTHROPIC_MODELS: ${BASEROW_ANTHROPIC_MODELS:-}
+  BASEROW_MISTRAL_API_KEY: ${BASEROW_MISTRAL_API_KEY:-}
+  BASEROW_MISTRAL_MODELS: ${BASEROW_MISTRAL_MODELS:-}
+  BASEROW_OLLAMA_HOST: ${BASEROW_OLLAMA_HOST:-}
+  BASEROW_OLLAMA_MODELS: ${BASEROW_OLLAMA_MODELS:-}
+
+  # Telemetry
+  SENTRY_DSN: ${SENTRY_DSN:-}
+  SENTRY_BACKEND_DSN: ${SENTRY_BACKEND_DSN:-}
+  BASEROW_ENABLE_OTEL: ${BASEROW_ENABLE_OTEL:-}
+  POSTHOG_PROJECT_API_KEY: ${POSTHOG_PROJECT_API_KEY:-}
+  POSTHOG_HOST: ${POSTHOG_HOST:-}
+
+  # Misc
+  BASEROW_DISABLE_GOOGLE_DOCS_FILE_PREVIEW: ${BASEROW_DISABLE_GOOGLE_DOCS_FILE_PREVIEW:-}
+  BASEROW_DISABLE_SUPPORT: ${BASEROW_DISABLE_SUPPORT:-}
+  FEATURE_FLAGS: ${FEATURE_FLAGS:-}
+  ADDITIONAL_APPS: ${ADDITIONAL_APPS:-}
+  ADDITIONAL_MODULES: ${ADDITIONAL_MODULES:-}
+  BASEROW_DEPLOYMENT_ENV: ${BASEROW_DEPLOYMENT_ENV:-docker-compose}
+
+# ─────────────────────────────────────────────────────────────────────
+# Shared logging policy — rotate JSON logs so the host disk stays sane.
+# ─────────────────────────────────────────────────────────────────────
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: ${LOG_MAX_SIZE:-10m}
+    max-file: ${LOG_MAX_FILE:-3}
+
+services:
+
+  # ───────────────────────────────────────────────────────────────────
+  # Caddy — internal reverse proxy. Dokploy/Traefik terminates TLS in
+  # front of this; Caddy listens on plain HTTP (port 80 inside the
+  # container) and routes /api, /ws, /mcp, /assistant to backend, /media
+  # and /static to the media/static volumes, and everything else to the
+  # web-frontend.
+  # ───────────────────────────────────────────────────────────────────
+  caddy:
+    container_name: ${CONTAINER_PREFIX:-baserow}-caddy
+    image: caddy:2.10.2
+    restart: unless-stopped
+    environment:
+      BASEROW_CADDY_ADDRESSES: ${BASEROW_CADDY_ADDRESSES:-:80}
+      BASEROW_CADDY_GLOBAL_CONF: ${BASEROW_CADDY_GLOBAL_CONF:-}
+      BASEROW_CADDY_BACKEND_EXTRA_ROUTES: ${BASEROW_CADDY_BACKEND_EXTRA_ROUTES:-}
+      PRIVATE_BACKEND_URL: ${PRIVATE_BACKEND_URL:-http://backend:8000}
+      PRIVATE_WEB_FRONTEND_URL: ${PRIVATE_WEB_FRONTEND_URL:-http://web-frontend:3000}
+      BASEROW_PUBLIC_URL: ${BASEROW_PUBLIC_URL:-http://localhost}
+      BASEROW_EXTRA_PUBLIC_URLS: ${BASEROW_EXTRA_PUBLIC_URLS:-}
+      MEDIA_ROOT: ${MEDIA_ROOT:-/baserow/media/}
+      STATIC_ROOT: ${STATIC_ROOT:-/baserow/static/}
+    expose:
+      - 80
+    configs:
+      - source: caddyfile
+        target: /etc/caddy/Caddyfile
+    volumes:
+      - media:/baserow/media
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      backend:
+        condition: service_started
+      web-frontend:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:80"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - default
+      - dokploy-network
+    logging: *default-logging
+
+  # ───────────────────────────────────────────────────────────────────
+  # Backend — Django REST + websocket API.
+  # Internal only (no dokploy-network) — only caddy is exposed.
+  # ───────────────────────────────────────────────────────────────────
+  backend:
+    container_name: ${CONTAINER_PREFIX:-baserow}-backend
+    image: baserow/backend:${BASEROW_VERSION:-2.2.2}
+    restart: unless-stopped
+    environment:
+      <<: *backend-variables
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      volume-permissions-fixer:
+        condition: service_completed_successfully
+    volumes:
+      - media:/baserow/media
+    healthcheck:
+      test: ["CMD-SHELL", "/baserow/backend/docker/docker-entrypoint.sh backend-healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    logging: *default-logging
+
+  # ───────────────────────────────────────────────────────────────────
+  # Web frontend — Nuxt UI
+  # ───────────────────────────────────────────────────────────────────
+  web-frontend:
+    container_name: ${CONTAINER_PREFIX:-baserow}-web-frontend
+    image: baserow/web-frontend:${BASEROW_VERSION:-2.2.2}
+    restart: unless-stopped
+    environment:
+      BASEROW_PUBLIC_URL: ${BASEROW_PUBLIC_URL:-http://localhost}
+      BASEROW_EXTRA_PUBLIC_URLS: ${BASEROW_EXTRA_PUBLIC_URLS:-}
+      PRIVATE_BACKEND_URL: ${PRIVATE_BACKEND_URL:-http://backend:8000}
+      PUBLIC_BACKEND_URL: ${PUBLIC_BACKEND_URL:-}
+      PUBLIC_WEB_FRONTEND_URL: ${PUBLIC_WEB_FRONTEND_URL:-}
+      BASEROW_EMBEDDED_SHARE_URL: ${BASEROW_EMBEDDED_SHARE_URL:-}
+      BASEROW_DISABLE_PUBLIC_URL_CHECK: ${BASEROW_DISABLE_PUBLIC_URL_CHECK:-}
+      INITIAL_TABLE_DATA_LIMIT: ${INITIAL_TABLE_DATA_LIMIT:-}
+      DOWNLOAD_FILE_VIA_XHR: ${DOWNLOAD_FILE_VIA_XHR:-}
+      BASEROW_DISABLE_GOOGLE_DOCS_FILE_PREVIEW: ${BASEROW_DISABLE_GOOGLE_DOCS_FILE_PREVIEW:-}
+      BASEROW_DISABLE_SUPPORT: ${BASEROW_DISABLE_SUPPORT:-}
+      HOURS_UNTIL_TRASH_PERMANENTLY_DELETED: ${HOURS_UNTIL_TRASH_PERMANENTLY_DELETED:-}
+      DISABLE_ANONYMOUS_PUBLIC_VIEW_WS_CONNECTIONS: ${DISABLE_ANONYMOUS_PUBLIC_VIEW_WS_CONNECTIONS:-}
+      FEATURE_FLAGS: ${FEATURE_FLAGS:-}
+      ADDITIONAL_MODULES: ${ADDITIONAL_MODULES:-}
+      BASEROW_MAX_IMPORT_FILE_SIZE_MB: ${BASEROW_MAX_IMPORT_FILE_SIZE_MB:-}
+      BASEROW_MAX_SNAPSHOTS_PER_GROUP: ${BASEROW_MAX_SNAPSHOTS_PER_GROUP:-}
+      BASEROW_DEPLOYMENT_ENV: ${BASEROW_DEPLOYMENT_ENV:-docker-compose}
+      BASEROW_OSS_ONLY: ${BASEROW_OSS_ONLY:-}
+      POSTHOG_PROJECT_API_KEY: ${POSTHOG_PROJECT_API_KEY:-}
+      POSTHOG_HOST: ${POSTHOG_HOST:-}
+      SENTRY_DSN: ${SENTRY_DSN:-}
+    depends_on:
+      backend:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "/baserow/web-frontend/docker/docker-entrypoint.sh web-frontend-healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    logging: *default-logging
+
+  # ───────────────────────────────────────────────────────────────────
+  # Celery — general async task worker (signals, table updates, etc.)
+  # ───────────────────────────────────────────────────────────────────
+  celery:
+    container_name: ${CONTAINER_PREFIX:-baserow}-celery
+    image: baserow/backend:${BASEROW_VERSION:-2.2.2}
+    restart: unless-stopped
+    command: celery-worker
+    environment:
+      <<: *backend-variables
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      volume-permissions-fixer:
+        condition: service_completed_successfully
+    volumes:
+      - media:/baserow/media
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "/baserow/backend/docker/docker-entrypoint.sh celery-worker-healthcheck"
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    logging: *default-logging
+
+  # ───────────────────────────────────────────────────────────────────
+  # Celery export worker — handles CSV/JSON/XLSX exports on its own
+  # queue so big exports don't block normal tasks.
+  # ───────────────────────────────────────────────────────────────────
+  celery-export-worker:
+    container_name: ${CONTAINER_PREFIX:-baserow}-celery-export
+    image: baserow/backend:${BASEROW_VERSION:-2.2.2}
+    restart: unless-stopped
+    command: celery-exportworker
+    environment:
+      <<: *backend-variables
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      volume-permissions-fixer:
+        condition: service_completed_successfully
+    volumes:
+      - media:/baserow/media
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "/baserow/backend/docker/docker-entrypoint.sh celery-exportworker-healthcheck"
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    logging: *default-logging
+
+  # ───────────────────────────────────────────────────────────────────
+  # Celery beat — schedules periodic tasks (trash cleanup, periodic
+  # field updates, etc.). SIGQUIT is required for clean shutdown.
+  # ───────────────────────────────────────────────────────────────────
+  celery-beat-worker:
+    container_name: ${CONTAINER_PREFIX:-baserow}-celery-beat
+    image: baserow/backend:${BASEROW_VERSION:-2.2.2}
+    restart: unless-stopped
+    command: celery-beat
+    stop_signal: SIGQUIT
+    environment:
+      <<: *backend-variables
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      volume-permissions-fixer:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "/baserow/backend/docker/docker-entrypoint.sh celery-beat-healthcheck"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    logging: *default-logging
+
+  # ───────────────────────────────────────────────────────────────────
+  # Postgres 15 with pgvector — Baserow requires the pgvector extension
+  # for AI / embeddings features.
+  # ───────────────────────────────────────────────────────────────────
+  db:
+    container_name: ${CONTAINER_PREFIX:-baserow}-db
+    image: pgvector/pgvector:pg15
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DATABASE_USER:-baserow}
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:?DATABASE_PASSWORD required}
+      POSTGRES_DB: ${DATABASE_NAME:-baserow}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DATABASE_USER:-baserow} -d ${DATABASE_NAME:-baserow}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    shm_size: ${PG_SHM_SIZE:-256mb}
+    command:
+      - "postgres"
+      - "-c"
+      - "shared_buffers=${PG_SHARED_BUFFERS:-256MB}"
+      - "-c"
+      - "effective_cache_size=${PG_EFFECTIVE_CACHE_SIZE:-1GB}"
+      - "-c"
+      - "work_mem=${PG_WORK_MEM:-4MB}"
+      - "-c"
+      - "maintenance_work_mem=${PG_MAINTENANCE_WORK_MEM:-128MB}"
+      - "-c"
+      - "max_connections=${PG_MAX_CONNECTIONS:-100}"
+      - "-c"
+      - "random_page_cost=${PG_RANDOM_PAGE_COST:-1.1}"
+      - "-c"
+      - "effective_io_concurrency=${PG_EFFECTIVE_IO_CONCURRENCY:-200}"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    logging: *default-logging
+
+  # ───────────────────────────────────────────────────────────────────
+  # Redis — cache + Celery broker (Baserow requires `redis:6` features)
+  # ───────────────────────────────────────────────────────────────────
+  redis:
+    container_name: ${CONTAINER_PREFIX:-baserow}-redis
+    image: redis:6
+    restart: unless-stopped
+    command:
+      - "redis-server"
+      - "--requirepass"
+      - "${REDIS_PASSWORD:?REDIS_PASSWORD required}"
+      - "--maxmemory"
+      - "${REDIS_MAXMEMORY:-512mb}"
+      - "--maxmemory-policy"
+      - "${REDIS_MAXMEMORY_POLICY:-allkeys-lru}"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    logging: *default-logging
+
+  # ───────────────────────────────────────────────────────────────────
+  # One-shot init job — the media volume mounts as root by default but
+  # Baserow's Django process runs as UID 9999. Without this fixer, the
+  # backend cannot write uploaded files into /baserow/media.
+  # ───────────────────────────────────────────────────────────────────
+  volume-permissions-fixer:
+    container_name: ${CONTAINER_PREFIX:-baserow}-volume-fixer
+    image: bash:4.4
+    command: chown 9999:9999 -R /baserow/media
+    volumes:
+      - media:/baserow/media
+    restart: "no"
+
+volumes:
+  pgdata:
+  media:
+  caddy_data:
+  caddy_config:
+
+networks:
+  dokploy-network:
+    external: true
