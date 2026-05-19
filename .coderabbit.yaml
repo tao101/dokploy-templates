@@ -1,0 +1,48 @@
+language: en-US
+tone_instructions: "Be direct, concise, and assertive. Surface every real issue. Skip pleasantries. Don't sugarcoat findings — explicit beats polite."
+early_access: false
+enable_free_tier: true
+reviews:
+  profile: "assertive"
+  request_changes_workflow: true
+  high_level_summary: true
+  high_level_summary_placeholder: ""
+  poem: false
+  review_status: true
+  collapse_walkthrough: false
+  changed_files_summary: true
+  sequence_diagrams: false
+  assess_linked_issues: true
+  related_issues: true
+  related_prs: true
+  suggested_labels: true
+  auto_apply_labels: false
+  suggested_reviewers: false
+  auto_assign_reviewers: false
+  auto_review:
+    enabled: true
+    drafts: true
+  path_filters: []
+  path_instructions:
+    - path: "**/*.yml"
+      instructions: "Validate that docker-compose YAML interpolation is correct, container_names don't clash, healthchecks have reasonable intervals/start_periods, depends_on conditions match service capabilities (service_healthy vs service_started vs service_completed_successfully), and embedded inline configs escape $ as $$ when they contain variables not meant for compose interpolation."
+    - path: "**/*.env"
+      instructions: "Check that every secret is a placeholder, never a real value. Verify defaults match the upstream project. Call out anything that is required-but-blank without a clear in-file pointer to where it gets set."
+    - path: "**/*.md"
+      instructions: "Validate every step number / cross-reference / link resolves. Code examples must be runnable as written. Commands and env-var names must match exactly what the compose / env file uses."
+  tools:
+    languagetool:
+      enabled: true
+      level: "default"
+    markdownlint:
+      enabled: true
+    yamllint:
+      enabled: true
+    actionlint:
+      enabled: true
+    shellcheck:
+      enabled: true
+    hadolint:
+      enabled: true
+chat:
+  auto_reply: true
