@@ -80,120 +80,133 @@ configs:
 
 # ─────────────────────────────────────────────────────────────────────
 # Anchor: every Baserow service container shares the same backend env.
-# Lets us configure 200+ Baserow knobs from `baserow.env` without
-# repeating them per-service.
+#
+# Convention used here (matches upstream baserow/baserow compose):
+#   * Required secrets        — `KEY: ${KEY:?msg}` so deploy fails fast.
+#   * Vars with a real default — `KEY: ${KEY:-default}` always set.
+#   * Optional vars            — `KEY:` (bare key, no value). Compose
+#     ONLY forwards them if they're defined in the parent env. If you
+#     leave a `KEY=` line empty in `baserow.env`, Dokploy still passes
+#     `KEY=""`, which crashes Baserow on numeric coercions like
+#     `int(os.getenv("X", 180))`. So in the env file, *delete* (don't
+#     blank) any optional var you're not using.
 # ─────────────────────────────────────────────────────────────────────
 x-backend-variables: &backend-variables
+  # ─── Required secrets ──────────────────────────────────────────────
   SECRET_KEY: ${SECRET_KEY:?SECRET_KEY required}
-  BASEROW_JWT_SIGNING_KEY: ${BASEROW_JWT_SIGNING_KEY:-}
   DATABASE_PASSWORD: ${DATABASE_PASSWORD:?DATABASE_PASSWORD required}
   REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD required}
 
+  # ─── Hard defaults ─────────────────────────────────────────────────
   BASEROW_PUBLIC_URL: ${BASEROW_PUBLIC_URL:-http://localhost}
-  BASEROW_EXTRA_PUBLIC_URLS: ${BASEROW_EXTRA_PUBLIC_URLS:-}
-  BASEROW_EXTRA_ALLOWED_HOSTS: ${BASEROW_EXTRA_ALLOWED_HOSTS:-}
-  BASEROW_ENABLE_SECURE_PROXY_SSL_HEADER: ${BASEROW_ENABLE_SECURE_PROXY_SSL_HEADER:-}
-  BASEROW_DISABLE_PUBLIC_URL_CHECK: ${BASEROW_DISABLE_PUBLIC_URL_CHECK:-}
-
-  # Database — defaults to the bundled `db` service
   DATABASE_USER: ${DATABASE_USER:-baserow}
   DATABASE_NAME: ${DATABASE_NAME:-baserow}
   DATABASE_HOST: ${DATABASE_HOST:-db}
   DATABASE_PORT: ${DATABASE_PORT:-5432}
-  DATABASE_OPTIONS: ${DATABASE_OPTIONS:-}
-  DATABASE_URL: ${DATABASE_URL:-}
-
-  # Redis — defaults to the bundled `redis` service
   REDIS_HOST: ${REDIS_HOST:-redis}
   REDIS_PORT: ${REDIS_PORT:-6379}
   REDIS_PROTOCOL: ${REDIS_PROTOCOL:-redis}
-  REDIS_URL: ${REDIS_URL:-}
-  REDIS_USER: ${REDIS_USER:-}
-
-  # Email / SMTP
-  EMAIL_SMTP: ${EMAIL_SMTP:-}
-  EMAIL_SMTP_HOST: ${EMAIL_SMTP_HOST:-}
-  EMAIL_SMTP_PORT: ${EMAIL_SMTP_PORT:-}
-  EMAIL_SMTP_USE_TLS: ${EMAIL_SMTP_USE_TLS:-}
-  EMAIL_SMTP_USE_SSL: ${EMAIL_SMTP_USE_SSL:-}
-  EMAIL_SMTP_USER: ${EMAIL_SMTP_USER:-}
-  EMAIL_SMTP_PASSWORD: ${EMAIL_SMTP_PASSWORD:-}
-  FROM_EMAIL: ${FROM_EMAIL:-}
-
-  # S3-compatible object storage (optional — leave blank to store on local volume)
-  AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
-  AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
-  AWS_STORAGE_BUCKET_NAME: ${AWS_STORAGE_BUCKET_NAME:-}
-  AWS_S3_REGION_NAME: ${AWS_S3_REGION_NAME:-}
-  AWS_S3_ENDPOINT_URL: ${AWS_S3_ENDPOINT_URL:-}
-  AWS_S3_CUSTOM_DOMAIN: ${AWS_S3_CUSTOM_DOMAIN:-}
-
-  # Workers & limits
-  BASEROW_AMOUNT_OF_GUNICORN_WORKERS: ${BASEROW_AMOUNT_OF_GUNICORN_WORKERS:-}
-  BASEROW_AMOUNT_OF_WORKERS: ${BASEROW_AMOUNT_OF_WORKERS:-}
-  BASEROW_RUN_MINIMAL: ${BASEROW_RUN_MINIMAL:-}
-  BASEROW_ROW_PAGE_SIZE_LIMIT: ${BASEROW_ROW_PAGE_SIZE_LIMIT:-}
-  BATCH_ROWS_SIZE_LIMIT: ${BATCH_ROWS_SIZE_LIMIT:-}
-  INITIAL_TABLE_DATA_LIMIT: ${INITIAL_TABLE_DATA_LIMIT:-}
-  BASEROW_FILE_UPLOAD_SIZE_LIMIT_MB: ${BASEROW_FILE_UPLOAD_SIZE_LIMIT_MB:-}
-  BASEROW_MAX_IMPORT_FILE_SIZE_MB: ${BASEROW_MAX_IMPORT_FILE_SIZE_MB:-}
-  BASEROW_UNIQUE_ROW_VALUES_SIZE_LIMIT: ${BASEROW_UNIQUE_ROW_VALUES_SIZE_LIMIT:-}
-
-  # Startup behaviour
   MIGRATE_ON_STARTUP: ${MIGRATE_ON_STARTUP:-true}
   SYNC_TEMPLATES_ON_STARTUP: ${SYNC_TEMPLATES_ON_STARTUP:-true}
-  BASEROW_TRIGGER_SYNC_TEMPLATES_AFTER_MIGRATION: ${BASEROW_TRIGGER_SYNC_TEMPLATES_AFTER_MIGRATION:-}
+  PRIVATE_BACKEND_URL: ${PRIVATE_BACKEND_URL:-http://backend:8000}
+  MEDIA_ROOT: ${MEDIA_ROOT:-/baserow/media}
+  BASEROW_DEPLOYMENT_ENV: ${BASEROW_DEPLOYMENT_ENV:-docker-compose}
+
+  # ─── Optional passthrough (only forwarded if set in baserow.env) ───
+  #
+  # IMPORTANT: To use an external DB / Redis, add DATABASE_URL or
+  # REDIS_URL to baserow.env with a real value. Do NOT leave them as
+  # `=` blanks — Baserow checks `if "DATABASE_URL" in os.environ` and
+  # would parse the empty string as a connection URL and crash.
+  BASEROW_JWT_SIGNING_KEY:
+  BASEROW_EXTRA_PUBLIC_URLS:
+  BASEROW_EXTRA_ALLOWED_HOSTS:
+  BASEROW_ENABLE_SECURE_PROXY_SSL_HEADER:
+  BASEROW_DISABLE_PUBLIC_URL_CHECK:
+  DATABASE_URL:
+  DATABASE_OPTIONS:
+  REDIS_URL:
+  REDIS_USER:
+
+  # Email / SMTP
+  EMAIL_SMTP:
+  EMAIL_SMTP_HOST:
+  EMAIL_SMTP_PORT:
+  EMAIL_SMTP_USE_TLS:
+  EMAIL_SMTP_USE_SSL:
+  EMAIL_SMTP_USER:
+  EMAIL_SMTP_PASSWORD:
+  FROM_EMAIL:
+
+  # S3-compatible object storage
+  AWS_ACCESS_KEY_ID:
+  AWS_SECRET_ACCESS_KEY:
+  AWS_STORAGE_BUCKET_NAME:
+  AWS_S3_REGION_NAME:
+  AWS_S3_ENDPOINT_URL:
+  AWS_S3_CUSTOM_DOMAIN:
+
+  # Workers & limits
+  BASEROW_AMOUNT_OF_GUNICORN_WORKERS:
+  BASEROW_AMOUNT_OF_WORKERS:
+  BASEROW_RUN_MINIMAL:
+  BASEROW_ROW_PAGE_SIZE_LIMIT:
+  BATCH_ROWS_SIZE_LIMIT:
+  INITIAL_TABLE_DATA_LIMIT:
+  BASEROW_FILE_UPLOAD_SIZE_LIMIT_MB:
+  BASEROW_MAX_IMPORT_FILE_SIZE_MB:
+  BASEROW_UNIQUE_ROW_VALUES_SIZE_LIMIT:
+
+  # Startup
+  BASEROW_TRIGGER_SYNC_TEMPLATES_AFTER_MIGRATION:
 
   # Logging
-  BASEROW_BACKEND_DEBUG: ${BASEROW_BACKEND_DEBUG:-}
-  BASEROW_BACKEND_LOG_LEVEL: ${BASEROW_BACKEND_LOG_LEVEL:-INFO}
+  BASEROW_BACKEND_DEBUG:
+  BASEROW_BACKEND_LOG_LEVEL:
 
   # URLs derived from BASEROW_PUBLIC_URL — leave blank to auto-derive
-  PRIVATE_BACKEND_URL: ${PRIVATE_BACKEND_URL:-http://backend:8000}
-  PUBLIC_BACKEND_URL: ${PUBLIC_BACKEND_URL:-}
-  PUBLIC_WEB_FRONTEND_URL: ${PUBLIC_WEB_FRONTEND_URL:-}
-  BASEROW_EMBEDDED_SHARE_URL: ${BASEROW_EMBEDDED_SHARE_URL:-}
-  MEDIA_URL: ${MEDIA_URL:-}
-  MEDIA_ROOT: ${MEDIA_ROOT:-/baserow/media}
+  PUBLIC_BACKEND_URL:
+  PUBLIC_WEB_FRONTEND_URL:
+  BASEROW_EMBEDDED_SHARE_URL:
+  MEDIA_URL:
 
   # Tokens & sessions
-  BASEROW_ACCESS_TOKEN_LIFETIME_MINUTES: ${BASEROW_ACCESS_TOKEN_LIFETIME_MINUTES:-}
-  BASEROW_REFRESH_TOKEN_LIFETIME_HOURS: ${BASEROW_REFRESH_TOKEN_LIFETIME_HOURS:-}
+  BASEROW_ACCESS_TOKEN_LIFETIME_MINUTES:
+  BASEROW_REFRESH_TOKEN_LIFETIME_HOURS:
 
   # Throttling
-  BASEROW_MAX_CONCURRENT_USER_REQUESTS: ${BASEROW_MAX_CONCURRENT_USER_REQUESTS:-}
-  BASEROW_CONCURRENT_USER_REQUESTS_THROTTLE_TIMEOUT: ${BASEROW_CONCURRENT_USER_REQUESTS_THROTTLE_TIMEOUT:-}
-  BASEROW_SEND_VERIFY_EMAIL_RATE_LIMIT: ${BASEROW_SEND_VERIFY_EMAIL_RATE_LIMIT:-}
+  BASEROW_MAX_CONCURRENT_USER_REQUESTS:
+  BASEROW_CONCURRENT_USER_REQUESTS_THROTTLE_TIMEOUT:
+  BASEROW_SEND_VERIFY_EMAIL_RATE_LIMIT:
 
   # Webhooks
-  BASEROW_WEBHOOKS_ALLOW_PRIVATE_ADDRESS: ${BASEROW_WEBHOOKS_ALLOW_PRIVATE_ADDRESS:-}
-  BASEROW_WEBHOOKS_MAX_RETRIES_PER_CALL: ${BASEROW_WEBHOOKS_MAX_RETRIES_PER_CALL:-}
+  BASEROW_WEBHOOKS_ALLOW_PRIVATE_ADDRESS:
+  BASEROW_WEBHOOKS_MAX_RETRIES_PER_CALL:
 
-  # Optional AI integrations
-  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-  BASEROW_OPENAI_API_KEY: ${BASEROW_OPENAI_API_KEY:-}
-  BASEROW_OPENAI_MODELS: ${BASEROW_OPENAI_MODELS:-}
-  BASEROW_ANTHROPIC_API_KEY: ${BASEROW_ANTHROPIC_API_KEY:-}
-  BASEROW_ANTHROPIC_MODELS: ${BASEROW_ANTHROPIC_MODELS:-}
-  BASEROW_MISTRAL_API_KEY: ${BASEROW_MISTRAL_API_KEY:-}
-  BASEROW_MISTRAL_MODELS: ${BASEROW_MISTRAL_MODELS:-}
-  BASEROW_OLLAMA_HOST: ${BASEROW_OLLAMA_HOST:-}
-  BASEROW_OLLAMA_MODELS: ${BASEROW_OLLAMA_MODELS:-}
+  # AI integrations
+  OPENAI_API_KEY:
+  BASEROW_OPENAI_API_KEY:
+  BASEROW_OPENAI_MODELS:
+  BASEROW_ANTHROPIC_API_KEY:
+  BASEROW_ANTHROPIC_MODELS:
+  BASEROW_MISTRAL_API_KEY:
+  BASEROW_MISTRAL_MODELS:
+  BASEROW_OLLAMA_HOST:
+  BASEROW_OLLAMA_MODELS:
 
   # Telemetry
-  SENTRY_DSN: ${SENTRY_DSN:-}
-  SENTRY_BACKEND_DSN: ${SENTRY_BACKEND_DSN:-}
-  BASEROW_ENABLE_OTEL: ${BASEROW_ENABLE_OTEL:-}
-  POSTHOG_PROJECT_API_KEY: ${POSTHOG_PROJECT_API_KEY:-}
-  POSTHOG_HOST: ${POSTHOG_HOST:-}
+  SENTRY_DSN:
+  SENTRY_BACKEND_DSN:
+  BASEROW_ENABLE_OTEL:
+  POSTHOG_PROJECT_API_KEY:
+  POSTHOG_HOST:
 
   # Misc
-  BASEROW_DISABLE_GOOGLE_DOCS_FILE_PREVIEW: ${BASEROW_DISABLE_GOOGLE_DOCS_FILE_PREVIEW:-}
-  BASEROW_DISABLE_SUPPORT: ${BASEROW_DISABLE_SUPPORT:-}
-  FEATURE_FLAGS: ${FEATURE_FLAGS:-}
-  ADDITIONAL_APPS: ${ADDITIONAL_APPS:-}
-  ADDITIONAL_MODULES: ${ADDITIONAL_MODULES:-}
-  BASEROW_DEPLOYMENT_ENV: ${BASEROW_DEPLOYMENT_ENV:-docker-compose}
+  BASEROW_DISABLE_GOOGLE_DOCS_FILE_PREVIEW:
+  BASEROW_DISABLE_SUPPORT:
+  FEATURE_FLAGS:
+  ADDITIONAL_APPS:
+  ADDITIONAL_MODULES:
 
 # ─────────────────────────────────────────────────────────────────────
 # Shared logging policy — rotate JSON logs so the host disk stays sane.
@@ -219,14 +232,15 @@ services:
     restart: unless-stopped
     environment:
       BASEROW_CADDY_ADDRESSES: ${BASEROW_CADDY_ADDRESSES:-:80}
-      BASEROW_CADDY_GLOBAL_CONF: ${BASEROW_CADDY_GLOBAL_CONF:-}
-      BASEROW_CADDY_BACKEND_EXTRA_ROUTES: ${BASEROW_CADDY_BACKEND_EXTRA_ROUTES:-}
       PRIVATE_BACKEND_URL: ${PRIVATE_BACKEND_URL:-http://backend:8000}
       PRIVATE_WEB_FRONTEND_URL: ${PRIVATE_WEB_FRONTEND_URL:-http://web-frontend:3000}
       BASEROW_PUBLIC_URL: ${BASEROW_PUBLIC_URL:-http://localhost}
-      BASEROW_EXTRA_PUBLIC_URLS: ${BASEROW_EXTRA_PUBLIC_URLS:-}
       MEDIA_ROOT: ${MEDIA_ROOT:-/baserow/media/}
       STATIC_ROOT: ${STATIC_ROOT:-/baserow/static/}
+      # Bare-key passthrough — only forwarded if non-empty in baserow.env.
+      BASEROW_CADDY_GLOBAL_CONF:
+      BASEROW_CADDY_BACKEND_EXTRA_ROUTES:
+      BASEROW_EXTRA_PUBLIC_URLS:
     expose:
       - 80
     configs:
@@ -242,11 +256,18 @@ services:
       web-frontend:
         condition: service_started
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:80"]
+      # Caddy only proxies when the Host header matches BASEROW_PUBLIC_URL,
+      # so plain `wget http://localhost:80` 404s. Pass the configured host
+      # via the runtime env var (Caddy already has it). $$VAR escapes the $
+      # so Compose doesn't try to interpolate; the container shell does it.
+      test:
+        - "CMD-SHELL"
+        - "wget -q --tries=1 --spider --header=\"Host: $${BASEROW_PUBLIC_URL#http*://}\" http://127.0.0.1:80/ || exit 1"
       interval: 30s
       timeout: 10s
       retries: 5
       start_period: 30s
+    mem_limit: ${CADDY_MEM_LIMIT:-4g}
     networks:
       - default
       - dokploy-network
@@ -277,6 +298,7 @@ services:
       timeout: 10s
       retries: 5
       start_period: 60s
+    mem_limit: ${BACKEND_MEM_LIMIT:-4g}
     logging: *default-logging
 
   # ───────────────────────────────────────────────────────────────────
@@ -288,36 +310,45 @@ services:
     restart: unless-stopped
     environment:
       BASEROW_PUBLIC_URL: ${BASEROW_PUBLIC_URL:-http://localhost}
-      BASEROW_EXTRA_PUBLIC_URLS: ${BASEROW_EXTRA_PUBLIC_URLS:-}
       PRIVATE_BACKEND_URL: ${PRIVATE_BACKEND_URL:-http://backend:8000}
-      PUBLIC_BACKEND_URL: ${PUBLIC_BACKEND_URL:-}
-      PUBLIC_WEB_FRONTEND_URL: ${PUBLIC_WEB_FRONTEND_URL:-}
-      BASEROW_EMBEDDED_SHARE_URL: ${BASEROW_EMBEDDED_SHARE_URL:-}
-      BASEROW_DISABLE_PUBLIC_URL_CHECK: ${BASEROW_DISABLE_PUBLIC_URL_CHECK:-}
-      INITIAL_TABLE_DATA_LIMIT: ${INITIAL_TABLE_DATA_LIMIT:-}
-      DOWNLOAD_FILE_VIA_XHR: ${DOWNLOAD_FILE_VIA_XHR:-}
-      BASEROW_DISABLE_GOOGLE_DOCS_FILE_PREVIEW: ${BASEROW_DISABLE_GOOGLE_DOCS_FILE_PREVIEW:-}
-      BASEROW_DISABLE_SUPPORT: ${BASEROW_DISABLE_SUPPORT:-}
-      HOURS_UNTIL_TRASH_PERMANENTLY_DELETED: ${HOURS_UNTIL_TRASH_PERMANENTLY_DELETED:-}
-      DISABLE_ANONYMOUS_PUBLIC_VIEW_WS_CONNECTIONS: ${DISABLE_ANONYMOUS_PUBLIC_VIEW_WS_CONNECTIONS:-}
-      FEATURE_FLAGS: ${FEATURE_FLAGS:-}
-      ADDITIONAL_MODULES: ${ADDITIONAL_MODULES:-}
-      BASEROW_MAX_IMPORT_FILE_SIZE_MB: ${BASEROW_MAX_IMPORT_FILE_SIZE_MB:-}
-      BASEROW_MAX_SNAPSHOTS_PER_GROUP: ${BASEROW_MAX_SNAPSHOTS_PER_GROUP:-}
       BASEROW_DEPLOYMENT_ENV: ${BASEROW_DEPLOYMENT_ENV:-docker-compose}
-      BASEROW_OSS_ONLY: ${BASEROW_OSS_ONLY:-}
-      POSTHOG_PROJECT_API_KEY: ${POSTHOG_PROJECT_API_KEY:-}
-      POSTHOG_HOST: ${POSTHOG_HOST:-}
-      SENTRY_DSN: ${SENTRY_DSN:-}
+      # Bare-key passthrough — only forwarded if non-empty in baserow.env.
+      BASEROW_EXTRA_PUBLIC_URLS:
+      PUBLIC_BACKEND_URL:
+      PUBLIC_WEB_FRONTEND_URL:
+      BASEROW_EMBEDDED_SHARE_URL:
+      BASEROW_DISABLE_PUBLIC_URL_CHECK:
+      INITIAL_TABLE_DATA_LIMIT:
+      DOWNLOAD_FILE_VIA_XHR:
+      BASEROW_DISABLE_GOOGLE_DOCS_FILE_PREVIEW:
+      BASEROW_DISABLE_SUPPORT:
+      HOURS_UNTIL_TRASH_PERMANENTLY_DELETED:
+      DISABLE_ANONYMOUS_PUBLIC_VIEW_WS_CONNECTIONS:
+      FEATURE_FLAGS:
+      ADDITIONAL_MODULES:
+      BASEROW_MAX_IMPORT_FILE_SIZE_MB:
+      BASEROW_MAX_SNAPSHOTS_PER_GROUP:
+      BASEROW_OSS_ONLY:
+      POSTHOG_PROJECT_API_KEY:
+      POSTHOG_HOST:
+      SENTRY_DSN:
     depends_on:
       backend:
         condition: service_started
     healthcheck:
-      test: ["CMD-SHELL", "/baserow/web-frontend/docker/docker-entrypoint.sh web-frontend-healthcheck"]
+      # The 2.2.2 web-frontend image no longer ships a `web-frontend-healthcheck`
+      # entrypoint subcommand (older docs reference it). Probe the Nitro server
+      # directly. The frontend SSRs every URL, so any 200 path is fine — `/login`
+      # is one of the lightest. Run inside the container with node since the
+      # base image is distroless / has no wget.
+      test:
+        - "CMD-SHELL"
+        - "node -e \"require('http').get('http://127.0.0.1:3000/login', r => process.exit(r.statusCode < 500 ? 0 : 1)).on('error', () => process.exit(1))\""
       interval: 30s
       timeout: 10s
       retries: 5
       start_period: 60s
+    mem_limit: ${WEB_FRONTEND_MEM_LIMIT:-4g}
     logging: *default-logging
 
   # ───────────────────────────────────────────────────────────────────
@@ -347,11 +378,18 @@ services:
       timeout: 10s
       retries: 5
       start_period: 60s
+    mem_limit: ${CELERY_MEM_LIMIT:-4g}
     logging: *default-logging
 
   # ───────────────────────────────────────────────────────────────────
-  # Celery export worker — handles CSV/JSON/XLSX exports on its own
-  # queue so big exports don't block normal tasks.
+  # Celery export worker — handles CSV/JSON/XLSX exports on its own queue
+  # so big exports don't block normal tasks.
+  #
+  # NOTE: If you're memory-constrained, set BASEROW_RUN_MINIMAL=true AND
+  # BASEROW_AMOUNT_OF_WORKERS=1 — Baserow's entrypoint then turns THIS
+  # container into a `sleep` shim (the main celery worker picks up the
+  # export queue too). In that combined mode the healthcheck below would
+  # always fail, so remove the healthcheck block when fusing queues.
   # ───────────────────────────────────────────────────────────────────
   celery-export-worker:
     container_name: ${CONTAINER_PREFIX:-baserow}-celery-export
@@ -377,6 +415,7 @@ services:
       timeout: 10s
       retries: 5
       start_period: 60s
+    mem_limit: ${CELERY_EXPORT_MEM_LIMIT:-4g}
     logging: *default-logging
 
   # ───────────────────────────────────────────────────────────────────
@@ -406,6 +445,7 @@ services:
       timeout: 10s
       retries: 3
       start_period: 60s
+    mem_limit: ${CELERY_BEAT_MEM_LIMIT:-4g}
     logging: *default-logging
 
   # ───────────────────────────────────────────────────────────────────
@@ -445,6 +485,7 @@ services:
       - "effective_io_concurrency=${PG_EFFECTIVE_IO_CONCURRENCY:-200}"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    mem_limit: ${DB_MEM_LIMIT:-4g}
     logging: *default-logging
 
   # ───────────────────────────────────────────────────────────────────
@@ -468,6 +509,7 @@ services:
       timeout: 5s
       retries: 5
       start_period: 15s
+    mem_limit: ${REDIS_MEM_LIMIT:-4g}
     logging: *default-logging
 
   # ───────────────────────────────────────────────────────────────────
