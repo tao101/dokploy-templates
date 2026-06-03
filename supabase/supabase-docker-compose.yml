@@ -401,7 +401,7 @@ configs:
             parsed, err = parse_regex(.event_message, r'^(?P<time>.*): (?P<msg>.*)$$')
             if err == null {
                 .event_message = parsed.msg
-                .timestamp = to_timestamp!(parsed.time)
+                .timestamp = parse_timestamp!(value: parsed.time, format: "%d/%b/%Y:%H:%M:%S %z")
                 .metadata.host = .project
             }
         realtime_logs_filtered:
@@ -838,7 +838,7 @@ services:
 
   studio:
     container_name: ${CONTAINER_PREFIX}-studio
-    image: supabase/studio:2026.02.09-sha-18cc6f8
+    image: supabase/studio:2026.04.27-sha-5f60601
     restart: unless-stopped
     volumes:
       - ../files/volumes/snippets:/app/snippets:Z
@@ -897,7 +897,7 @@ services:
 
   kong:
     container_name: ${CONTAINER_PREFIX}-kong
-    image: kong:2.8.1
+    image: kong/kong:3.9.1
     restart: unless-stopped
     ulimits:
       nofile:
@@ -919,13 +919,13 @@ services:
       retries: 3
     configs:
       - source: kong_config
-        target: /home/kong/temp.yml
+        target: /usr/local/kong/temp.yml
     depends_on:
       analytics:
         condition: service_healthy
     environment:
       KONG_DATABASE: "off"
-      KONG_DECLARATIVE_CONFIG: /home/kong/kong.yml
+      KONG_DECLARATIVE_CONFIG: /usr/local/kong/kong.yml
       # https://github.com/supabase/cli/issues/14
       KONG_DNS_ORDER: LAST,A,CNAME
       KONG_PLUGINS: request-transformer,cors,key-auth,acl,basic-auth,request-termination,ip-restriction
@@ -936,7 +936,10 @@ services:
       DASHBOARD_USERNAME: ${DASHBOARD_USERNAME}
       DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD}
     # https://unix.stackexchange.com/a/294837
-    entrypoint: bash -c 'eval "echo \"$$(cat ~/temp.yml)\"" > ~/kong.yml && /docker-entrypoint.sh kong docker-start'
+    # kong 3.9 runs as non-root (uid 1001) and has no /home/kong; write the
+    # interpolated declarative config to /usr/local/kong (writable) and use the
+    # 3.x entrypoint name (/entrypoint.sh, was /docker-entrypoint.sh in 2.x).
+    entrypoint: bash -c 'eval "echo \"$$(cat /usr/local/kong/temp.yml)\"" > /usr/local/kong/kong.yml && /entrypoint.sh kong docker-start'
     logging:
       driver: json-file
       options:
@@ -945,7 +948,7 @@ services:
 
   auth:
     container_name: ${CONTAINER_PREFIX}-auth
-    image: supabase/gotrue:v2.185.0
+    image: supabase/gotrue:v2.186.0
     restart: unless-stopped
     healthcheck:
       test:
@@ -1016,7 +1019,7 @@ services:
 
   rest:
     container_name: ${CONTAINER_PREFIX}-rest
-    image: postgrest/postgrest:v14.3
+    image: postgrest/postgrest:v14.8
     restart: unless-stopped
     depends_on:
       db:
@@ -1044,7 +1047,7 @@ services:
   realtime:
     # This container name looks inconsistent but is correct because realtime constructs tenant id by parsing the subdomain
     container_name: realtime-dev.${CONTAINER_PREFIX}-realtime
-    image: supabase/realtime:v2.72.0
+    image: supabase/realtime:v2.76.5
     restart: unless-stopped
     depends_on:
       db:
@@ -1095,7 +1098,7 @@ services:
   # To use S3 backed storage: docker compose -f docker-compose.yml -f docker-compose.s3.yml up
   storage:
     container_name: ${CONTAINER_PREFIX}-storage
-    image: supabase/storage-api:v1.37.7
+    image: supabase/storage-api:v1.48.26
     restart: unless-stopped
     volumes:
       - ../files/volumes/storage:/var/lib/storage:z
@@ -1172,7 +1175,7 @@ services:
 
   meta:
     container_name: ${CONTAINER_PREFIX}-meta
-    image: supabase/postgres-meta:v0.95.2
+    image: supabase/postgres-meta:v0.96.3
     restart: unless-stopped
     depends_on:
       db:
@@ -1196,7 +1199,7 @@ services:
 
   analytics:
     container_name: ${CONTAINER_PREFIX}-analytics
-    image: supabase/logflare:1.30.3
+    image: supabase/logflare:1.36.1
     restart: unless-stopped
     # ports:
     #   - 4000:4000
@@ -1244,10 +1247,12 @@ services:
   # (unlike named volumes which auto-copy on first use).
   db-init:
     container_name: ${CONTAINER_PREFIX}-db-init
-    image: supabase/postgres:17.6.1.081
+    image: supabase/postgres:17.6.1.084
     restart: "no"
     volumes:
       - ../files/volumes/db/config:/mnt/db-config:Z
+    environment:
+      SUPABASE_HOST: ${SUPABASE_HOST}
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
@@ -1259,11 +1264,34 @@ services:
         else
           echo "Config directory already populated, skipping."
         fi
+        # Generate a self-signed TLS cert so Postgres can serve ssl=on connections.
+        # Persisted in the config bind mount; clients connect with sslmode=require.
+        # NOTE: the supabase/postgres image is Nix-based — openssl is NOT on PATH,
+        # it lives under /nix/store/*openssl*-bin/. Resolve it dynamically so this
+        # survives image version bumps (the store hash changes per version).
+        if [ ! -f /mnt/db-config/server.crt ] || [ ! -f /mnt/db-config/server.key ]; then
+          echo "Generating self-signed TLS cert for Postgres..."
+          OPENSSL="$$(ls /nix/store/*openssl*-bin/bin/openssl 2>/dev/null | head -1)"
+          if [ -z "$$OPENSSL" ]; then
+            echo "FATAL: openssl not found in image — cannot generate TLS cert" >&2
+            exit 1
+          fi
+          "$$OPENSSL" req -new -x509 -days 3650 -nodes -text \
+            -subj "/CN=$${SUPABASE_HOST}" \
+            -out /mnt/db-config/server.crt \
+            -keyout /mnt/db-config/server.key || { echo "FATAL: cert generation failed" >&2; exit 1; }
+          chown postgres:postgres /mnt/db-config/server.key /mnt/db-config/server.crt
+          chmod 600 /mnt/db-config/server.key
+          chmod 644 /mnt/db-config/server.crt
+          echo "Cert generated: $$(ls -l /mnt/db-config/server.crt /mnt/db-config/server.key)"
+        else
+          echo "TLS cert already present, skipping."
+        fi
 
   # Comment out everything below this point if you are using an external Postgres database
   db:
     container_name: ${CONTAINER_PREFIX}-db
-    image: supabase/postgres:17.6.1.081
+    image: supabase/postgres:17.6.1.084
     restart: unless-stopped
     shm_size: ${PG_SHM_SIZE:-2g}
     ports:
@@ -1369,6 +1397,13 @@ services:
         "huge_pages=${PG_HUGE_PAGES:-try}",
         "-c",
         "default_statistics_target=${PG_DEFAULT_STATISTICS_TARGET:-100}",
+        # ── TLS / SSL (self-signed cert generated by db-init; clients use sslmode=require) ──
+        "-c",
+        "ssl=on",
+        "-c",
+        "ssl_cert_file=/etc/postgresql-custom/server.crt",
+        "-c",
+        "ssl_key_file=/etc/postgresql-custom/server.key",
       ]
     logging:
       driver: json-file
@@ -1378,7 +1413,7 @@ services:
 
   vector:
     container_name: ${CONTAINER_PREFIX}-vector
-    image: timberio/vector:0.28.1-alpine
+    image: timberio/vector:0.53.0-alpine
     restart: unless-stopped
     configs:
       - source: vector_config
@@ -1536,7 +1571,7 @@ services:
 
   functions:
     container_name: ${CONTAINER_PREFIX}-functions
-    image: supabase/edge-runtime:v1.70.0
+    image: supabase/edge-runtime:v1.71.2
     restart: unless-stopped
     volumes:
       - ../files/volumes/functions:/home/deno/functions:Z
@@ -1616,7 +1651,13 @@ services:
       [
         "/bin/sh",
         "-c",
-        "/app/bin/migrate && /app/bin/supavisor eval \"$$(cat /etc/pooler/pooler.exs)\" && /app/bin/server"
+        "/app/bin/migrate && \
+         echo 'Waiting for db role passwords (99-roles.sql) before seeding tenant...' && \
+         until PGPASSWORD=\"$$POSTGRES_PASSWORD\" psql \"host=db port=$$POSTGRES_PORT user=pgbouncer dbname=$$POSTGRES_DB\" -tAc 'SELECT 1' >/dev/null 2>&1; do \
+           echo '  pgbouncer auth not ready yet, retrying in 2s...'; sleep 2; \
+         done && \
+         echo 'pgbouncer auth OK — seeding tenant.' && \
+         /app/bin/supavisor eval \"$$(cat /etc/pooler/pooler.exs)\" && /app/bin/server"
       ]
     logging:
       driver: json-file
