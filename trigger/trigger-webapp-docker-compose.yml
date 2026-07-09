@@ -20,7 +20,7 @@ name: trigger-webapp
 
 services:
   trigger:
-    image: "ghcr.io/triggerdotdev/trigger.dev@sha256:b208b821aebeafe1e814618e92009e104bcb66d7b67d9aee580f5b12ce9391ca"
+    image: "ghcr.io/triggerdotdev/trigger.dev:v4.5.1"
     container_name: ${CONTAINER_PREFIX}-trigger
     restart: unless-stopped
     depends_on:
