@@ -32,7 +32,7 @@
 
 services:
   trigger:
-    image: "ghcr.io/triggerdotdev/trigger.dev:v4.5.1"
+    image: "ghcr.io/triggerdotdev/trigger.dev:v4.5.8"
     user: root
     stop_grace_period: 35s
     command: |
@@ -100,7 +100,11 @@ services:
       SESSION_SECRET: "${SESSION_SECRET}"
       MAGIC_LINK_SECRET: "${MAGIC_LINK_SECRET}"
       ENCRYPTION_KEY: "${ENCRYPTION_KEY}"
+      PROVIDER_SECRET: "${PROVIDER_SECRET}"
+      COORDINATOR_SECRET: "${COORDINATOR_SECRET}"
       MANAGED_WORKER_SECRET: "${MANAGED_WORKER_SECRET}"
+      # Temporary upgrade escape hatch only; keep disabled for normal operation.
+      ALLOW_INSECURE_DEFAULT_SECRETS: "${ALLOW_INSECURE_DEFAULT_SECRETS:-0}"
       # External databases via DB_HOST (DB server public IP)
       DATABASE_URL: "postgresql://postgres:${POSTGRES_PASSWORD}@${DB_HOST}:5432/${POSTGRES_DB:-trigger}?schema=public&sslmode=disable"
       DIRECT_URL: "postgresql://postgres:${POSTGRES_PASSWORD}@${DB_HOST}:5432/${POSTGRES_DB:-trigger}?schema=public&sslmode=disable"
@@ -141,6 +145,8 @@ services:
       RUN_REPLICATION_ENABLED: 1
       RUN_REPLICATION_CLICKHOUSE_URL: "http://${CLICKHOUSE_ADMIN_USER:-default}:${CLICKHOUSE_PASSWORD}@${DB_HOST}:8123"
       RUN_REPLICATION_LOG_LEVEL: info
+      # v4.5.8 opt-in: read realtime run data from the primary database.
+      REALTIME_BACKEND_NATIVE_RUN_READS_FROM_PRIMARY: "${REALTIME_BACKEND_NATIVE_RUN_READS_FROM_PRIMARY:-0}"
       APP_LOG_LEVEL: info
       TRIGGER_TELEMETRY_DISABLED: 0
       # ── Email (SMTP via Mailjet) ──
