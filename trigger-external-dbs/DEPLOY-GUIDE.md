@@ -1,6 +1,48 @@
 # Trigger.dev Distributed Deployment Guide — External Databases (Dokploy Remote Servers)
 
-Deploy Trigger.dev v4 with databases on a dedicated Dokploy remote server, the webapp as a Dokploy Stack (Docker Swarm with replicas), and multiple workers on Dokploy remote servers.
+Deploy Trigger.dev v4.5.8 with databases on a dedicated Dokploy remote server, the webapp as a Dokploy Stack (Docker Swarm with replicas), and multiple workers on Dokploy remote servers.
+
+## Upgrade an Existing v4.5.1 Deployment to v4.5.8
+
+These templates pin both the webapp and supervisor images to `v4.5.8`. Review the
+[v4.5.8 changelog](https://trigger.dev/changelog/v4-5-8) and
+[GitHub release](https://github.com/triggerdotdev/trigger.dev/releases/tag/v4.5.8)
+before upgrading.
+
+This path assumes every task project already uses the Trigger.dev v4 SDK/CLI.
+Trigger.dev 4.5.4 and later reject v3 triggers, deploys, and development sessions.
+
+1. Back up PostgreSQL, ClickHouse, MinIO, the registry, NFS shared data, and all
+   three current Dokploy environment sets. The `trigger-dbs` compose and datastore
+   image versions do not change for this Trigger.dev upgrade.
+2. Keep the existing `SESSION_SECRET`, `MAGIC_LINK_SECRET`, `ENCRYPTION_KEY`,
+   `MANAGED_WORKER_SECRET`, shared database passwords, registry password, and worker
+   token unchanged. Rotating them during an image upgrade can invalidate sessions,
+   make encrypted data unreadable, disconnect workers, or break existing volumes.
+3. Add `PROVIDER_SECRET` and `COORDINATOR_SECRET` to the webapp environment. Generate
+   a new value for each with `openssl rand -hex 16`.
+4. Add `REALTIME_BACKEND_NATIVE_RUN_READS_FROM_PRIMARY=0`. This v4.5.8 option is
+   disabled by default and does not need to be enabled for this single-primary
+   database topology.
+5. Keep `ALLOW_INSECURE_DEFAULT_SECRETS=0`. Trigger.dev 4.5.6 and later reject the
+   old published defaults. If the webapp reports a known-insecure default, rotate
+   the affected secret. Do not rotate an existing `ENCRYPTION_KEY` without a data
+   migration plan; set `ALLOW_INSECURE_DEFAULT_SECRETS=1` only as a temporary bridge.
+6. Set `TRIGGER_REPLICAS=1`, replace the webapp stack compose with this version, and
+   deploy it. The single webapp replica applies PostgreSQL and ClickHouse migrations
+   automatically.
+7. After the webapp healthcheck passes, replace the worker compose and redeploy
+   workers one at a time. Keep `MANAGED_WORKER_SECRET`, `REGISTRY_PASSWORD`, and
+   `TRIGGER_WORKER_TOKEN` unchanged.
+8. Restore the normal `TRIGGER_REPLICAS` value and redeploy. In each task project,
+   run `npx trigger.dev@4.5.8 update`, review its dependency changes, and redeploy
+   with the v4.5.8 CLI.
+9. Verify login, an existing project/run, a newly triggered run, task logs, and
+   registry pulls.
+
+No S2 service or additional migration command is required for this upgrade.
+Trigger.dev 4.5.8 still defaults to the Redis-backed v1 realtime stream backend when
+the optional S2 variables are absent.
 
 ## Architecture
 
@@ -55,7 +97,8 @@ These secrets must be identical across env files:
 | `MANAGED_WORKER_SECRET` | - | Yes | Yes |
 | `REGISTRY_PASSWORD` | - | Yes | Yes |
 
-The provided env files already have matching pre-generated secrets. If you regenerate any, update all env files that reference it.
+The env files contain matching placeholders, not deployable secrets. For a fresh
+deployment, generate each value and copy it to every env file marked `Yes`.
 
 ## Step 1: Prepare the Database Server
 
@@ -174,10 +217,11 @@ docker service logs trigger-webapp_trigger 2>&1 | grep -A15 "Worker Token"
 
 ### 4.6 Secrets
 
-The env file comes with pre-generated secrets. If you want to regenerate any, run:
+The env file contains placeholders. For a fresh deployment, generate a unique value
+for every required secret with:
 
 ```bash
-openssl rand -base64 32
+openssl rand -hex 16
 ```
 
 **Important:** Shared secrets (POSTGRES_PASSWORD, REDIS_PASSWORD, CLICKHOUSE_PASSWORD, MINIO_PASSWORD) must match `trigger-dbs.env`. See the Shared Secrets Reference table above.
@@ -304,7 +348,8 @@ Update these values (same for all workers):
 | `TRIGGER_WORKER_TOKEN` | `tr_wgt_xxxxx` | From Step 6 |
 | `DOCKER_REGISTRY_URL` | `https://registry.yourdomain.com` | Your registry domain from Step 5 |
 
-**Note:** `MANAGED_WORKER_SECRET` and `REGISTRY_PASSWORD` are pre-filled and already match the webapp env file. All 4 workers use the same token and secrets.
+**Note:** Copy `MANAGED_WORKER_SECRET` and `REGISTRY_PASSWORD` from the deployed
+webapp environment. All workers use the same worker token and shared secrets.
 
 ### 9.5 Deploy
 

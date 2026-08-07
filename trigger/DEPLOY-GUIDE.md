@@ -1,6 +1,46 @@
 # Trigger.dev Distributed Deployment Guide (Dokploy)
 
-Deploy Trigger.dev v4 with a separate webapp server and worker server(s) using Dokploy.
+Deploy Trigger.dev v4.5.8 with a separate webapp server and worker server(s) using Dokploy.
+
+## Upgrade an Existing v4.5.1 Deployment to v4.5.8
+
+These templates pin both the webapp and supervisor images to `v4.5.8`. Review the
+[v4.5.8 changelog](https://trigger.dev/changelog/v4-5-8) and
+[GitHub release](https://github.com/triggerdotdev/trigger.dev/releases/tag/v4.5.8)
+before upgrading.
+
+This path assumes every task project already uses the Trigger.dev v4 SDK/CLI.
+Trigger.dev 4.5.4 and later reject v3 triggers, deploys, and development sessions.
+
+1. Back up PostgreSQL, ClickHouse, MinIO, the registry, and your current Dokploy
+   environment values.
+2. Keep the existing `SESSION_SECRET`, `MAGIC_LINK_SECRET`, `ENCRYPTION_KEY`,
+   `MANAGED_WORKER_SECRET`, database passwords, registry password, and worker token
+   unchanged. Rotating them during an image upgrade can invalidate sessions, make
+   encrypted data unreadable, disconnect workers, or break existing volumes.
+3. Add `PROVIDER_SECRET` and `COORDINATOR_SECRET` to the webapp environment. Generate
+   a new value for each with `openssl rand -hex 16`.
+4. Add `REALTIME_BACKEND_NATIVE_RUN_READS_FROM_PRIMARY=0`. This v4.5.8 option is
+   disabled by default and does not need to be enabled for this single-primary
+   database topology.
+5. Keep `ALLOW_INSECURE_DEFAULT_SECRETS=0`. Trigger.dev 4.5.6 and later reject the
+   old published defaults. If the webapp reports a known-insecure default, rotate
+   the affected secret. Do not rotate an existing `ENCRYPTION_KEY` without a data
+   migration plan; set `ALLOW_INSECURE_DEFAULT_SECRETS=1` only as a temporary bridge.
+6. Replace the webapp compose with this version and redeploy it first. The webapp
+   entrypoint automatically applies the included PostgreSQL migration and any
+   ClickHouse migrations.
+7. After the webapp healthcheck passes, replace the worker compose and redeploy each
+   worker. Keep `MANAGED_WORKER_SECRET`, `REGISTRY_PASSWORD`, and
+   `TRIGGER_WORKER_TOKEN` unchanged.
+8. In each task project, run `npx trigger.dev@4.5.8 update`, review its dependency
+   changes, and redeploy with the v4.5.8 CLI.
+9. Verify login, an existing project/run, a newly triggered run, task logs, and
+   registry pulls. Then restore normal traffic.
+
+No database-service image change, S2 service, or additional migration command is
+required for this upgrade. Trigger.dev 4.5.8 still defaults to the Redis-backed v1
+realtime stream backend when the optional S2 variables are absent.
 
 ## Architecture
 
@@ -59,13 +99,15 @@ Copy the entire contents of `trigger-webapp-docker-compose.yml` into the compose
 
 ### 2.4 Secrets
 
-The env file comes with pre-generated secrets. If you want to regenerate any, run:
+The env file contains placeholders. For a fresh deployment, generate a unique value
+for every required secret with:
 
 ```bash
-openssl rand -base64 32
+openssl rand -hex 16
 ```
 
-**Important:** `MANAGED_WORKER_SECRET` and `REGISTRY_PASSWORD` must match between webapp and worker env files. The provided files already have matching values.
+**Important:** Copy the generated `MANAGED_WORKER_SECRET` and `REGISTRY_PASSWORD`
+values to the worker env file; they must match the webapp.
 
 ### 2.5 Select Hardware Tier
 
@@ -179,7 +221,9 @@ Update these values:
 | `TRIGGER_WORKER_TOKEN` | `tr_wgt_xxxxx` | From Step 4 |
 | `DOCKER_REGISTRY_URL` | `https://registry.yourdomain.com` | Your registry domain from Step 3 |
 
-**Note:** `MANAGED_WORKER_SECRET` and `REGISTRY_PASSWORD` are pre-filled and already match the webapp env file. `DOCKER_RUNNER_NETWORKS` is hardcoded to `dokploy-network` in the compose file — no configuration needed.
+**Note:** Copy `MANAGED_WORKER_SECRET` and `REGISTRY_PASSWORD` from the deployed
+webapp environment. `DOCKER_RUNNER_NETWORKS` is hardcoded to `dokploy-network` in
+the compose file — no configuration needed.
 
 ### 6.5 Deploy
 
@@ -352,7 +396,7 @@ BACKUP_S3_REGION=us-east-1
 | File | Purpose |
 |------|---------|
 | `trigger-webapp-docker-compose.yml` | Webapp compose (trigger, postgres, redis, clickhouse, electric, minio, registry, backups) |
-| `trigger-webapp.env` | Webapp environment with pre-generated secrets and tiered hardware tuning |
+| `trigger-webapp.env` | Webapp environment with required secret placeholders and tiered hardware tuning |
 | `trigger-worker-docker-compose.yml` | Worker compose (supervisor, docker-proxy) |
 | `trigger-worker.env` | Worker environment with matching secrets and scaling settings |
 | `server-setup-webapp.md` | Host kernel tuning commands for webapp server |

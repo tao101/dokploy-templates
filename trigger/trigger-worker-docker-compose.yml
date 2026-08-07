@@ -12,7 +12,7 @@ name: trigger-worker
 
 services:
   supervisor:
-    image: "ghcr.io/triggerdotdev/supervisor:v4.5.1"
+    image: "ghcr.io/triggerdotdev/supervisor:v4.5.8"
     container_name: ${CONTAINER_PREFIX}-supervisor
     restart: unless-stopped
     depends_on:
@@ -121,4 +121,3 @@ services:
 networks:
   dokploy-network:
     external: true
-
