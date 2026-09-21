@@ -1,6 +1,6 @@
 # Dokploy Templates
 
-A collection of production-ready Docker Compose templates I use and open-source for anyone who wants to self-host **Supabase** and **Trigger.dev** using [Dokploy](https://dokploy.com).
+A collection of production-ready Docker Compose templates I use and open-source for anyone who wants to self-host **Supabase**, **Trigger.dev**, **Baserow** and **PostHog** using [Dokploy](https://dokploy.com).
 
 Every template is **fully standalone** — config files are embedded inline in the compose file using Docker Compose `configs:`, so you just paste the compose + env into Dokploy and deploy. No external file mounts needed.
 
@@ -11,6 +11,8 @@ Every template is **fully standalone** — config files are embedded inline in t
 | [`supabase/`](supabase/) | Self-hosted Supabase (13 services: Postgres, Kong, Auth, REST, Realtime, Storage, Edge Functions, Studio, etc.) — standard and optimized (Hetzner CCX33) variants | [README](supabase/README.md) · [Deploy Guide](supabase/DEPLOY-GUIDE.md) · [Upgrade Guide](supabase/UPGRADE-GUIDE.md) |
 | [`trigger/`](trigger/) | Trigger.dev webapp + worker on separate servers (all-in-one compose per server) | [Deploy Guide](trigger/DEPLOY-GUIDE.md) |
 | [`trigger-external-dbs/`](trigger-external-dbs/) | Trigger.dev with a dedicated DB server — databases on a remote, webapp as a Swarm stack, workers on separate remotes | [Deploy Guide](trigger-external-dbs/DEPLOY-GUIDE.md) |
+| [`baserow/`](baserow/) | Self-hosted Baserow (no-code database) | [README](baserow/README.md) · [Deploy Guide](baserow/DEPLOY-GUIDE.md) |
+| [`posthog/`](posthog/) | Self-hosted PostHog (35 services) as one compose stack, tuned for a Hetzner CX43 (8 vCPU / 16GB / 160GB) | [README](posthog/README.md) · [Deploy Guide](posthog/DEPLOY-GUIDE.md) |
 
 ## Key Features
 
@@ -54,6 +56,12 @@ Every template is **fully standalone** — config files are embedded inline in t
 │   ├── trigger-webapp.env                   # Webapp env template
 │   ├── trigger-worker-docker-compose.yml    # Worker compose
 │   └── trigger-worker.env                   # Worker env template
+├── posthog/
+│   ├── README.md                            # Overview and quick start
+│   ├── DEPLOY-GUIDE.md                      # Step-by-step deployment
+│   ├── server-setup.md                      # CX43 host prep (swap, disk plan)
+│   ├── posthog-docker-compose.yml           # Whole stack, configs embedded inline
+│   └── posthog.env                          # Env template with tiered tuning
 └── trigger-external-dbs/
     ├── DEPLOY-GUIDE.md                      # Multi-server deployment guide
     ├── server-setup-dbs.md                  # DB server tuning + firewall

@@ -1,0 +1,2499 @@
+# PostHog (self-hosted) for Dokploy — tuned for Hetzner CX43 (8 vCPU / 16 GB / 160 GB NVMe)
+# =========================================================================================
+# Standalone template: paste this compose + posthog.env into Dokploy and deploy.
+# Every config file is embedded inline via Docker Compose `configs:` — no file mounts needed.
+#
+# Derived from PostHog's official hobby stack:
+#   https://github.com/PostHog/posthog/blob/master/docker-compose.hobby.yml
+#   https://github.com/PostHog/posthog/blob/master/docker-compose.base.yml
+# with `extends:` flattened, `build:` removed, host port publishing removed, TLS delegated
+# to Dokploy's Traefik, and every memory-hungry default resized for a 16 GB box.
+#
+# Deliberate differences from upstream hobby — see DEPLOY-GUIDE.md "What differs from upstream":
+#   - Caddy terminates plain HTTP on :80 behind Traefik instead of owning 80/443 + ACME
+#   - elasticsearch / temporal-ui / temporal-admin-tools / asyncmigrationscheck dropped
+#   - capture-ai added (upstream hobby routes /i/v0/ai to a service it never defines)
+#   - Postgres and MinIO credentials are generated, not the published `posthog:posthog` defaults
+#   - explicit memory limits on every service, and ClickHouse / Redpanda / Postgres / Celery /
+#     Nginx Unit / Node heaps sized for 16 GB instead of a 64 GB+ machine
+#
+# Domain setup (after first deploy):
+#   Dokploy UI -> compose service -> Domains -> Add Domain
+#     Domain: posthog.yourdomain.com   Service: proxy   Container Port: 80   HTTPS: on
+#   Then set POSTHOG_DOMAIN in the env to the same host and redeploy.
+
+name: posthog
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "3"
+
+# Everything the Django/Celery/Temporal containers need to reach the data layer.
+# Upstream loads these from the repo's .env.services; inlined here so the template stays standalone.
+x-posthog-services-env: &posthog-services-env
+  DATABASE_URL: "postgres://posthog:${POSTGRES_PASSWORD}@db:5432/posthog"
+  PGHOST: db
+  PGUSER: posthog
+  PGPASSWORD: "${POSTGRES_PASSWORD}"
+  CLICKHOUSE_HOST: clickhouse
+  CLICKHOUSE_DATABASE: posthog
+  CLICKHOUSE_SECURE: "false"
+  CLICKHOUSE_VERIFY: "false"
+  CLICKHOUSE_API_USER: api
+  CLICKHOUSE_API_PASSWORD: apipass
+  CLICKHOUSE_APP_USER: app
+  CLICKHOUSE_APP_PASSWORD: apppass
+  CLICKHOUSE_BILLING_USER: billing
+  CLICKHOUSE_BILLING_PASSWORD: billingpass
+  CLICKHOUSE_DICT_READER_USER: dict_reader
+  CLICKHOUSE_DICT_READER_PASSWORD: dictreaderpass
+  REDIS_URL: "redis://redis7:6379/"
+  KAFKA_HOSTS: "kafka:9092"
+  OBJECT_STORAGE_ENDPOINT: "http://objectstorage:19000"
+  OBJECT_STORAGE_ACCESS_KEY_ID: "${MINIO_ROOT_USER}"
+  OBJECT_STORAGE_SECRET_ACCESS_KEY: "${MINIO_ROOT_PASSWORD}"
+  OBJECT_STORAGE_FORCE_PATH_STYLE: "true"
+  # Traefik terminates TLS and Caddy forwards plain HTTP, so Django must trust the
+  # proxy headers and must not bounce requests to https:// (that would loop).
+  IS_BEHIND_PROXY: "true"
+  DISABLE_SECURE_SSL_REDIRECT: "true"
+
+# Shared by web, worker and temporal-django-worker (upstream's `worker` anchor).
+x-posthog-app-env: &posthog-app-env
+  <<: *posthog-services-env
+  SITE_URL: "https://${POSTHOG_DOMAIN}"
+  SECRET_KEY: "${POSTHOG_SECRET}"
+  ENCRYPTION_SALT_KEYS: "${ENCRYPTION_SALT_KEYS}"
+  INTERNAL_API_SECRET: "${POSTHOG_SECRET}"
+  DEPLOYMENT: hobby
+  OTEL_SDK_DISABLED: "true"
+  OTEL_EXPORTER_OTLP_ENDPOINT: ""
+  API_QUERIES_PER_TEAM: '{"1": 100}'
+  CDP_API_URL: "http://plugins:6738"
+  FLAGS_REDIS_ENABLED: "false"
+  # Hobby keeps persons in the main posthog database, so both point at it.
+  PERSONS_DB_WRITER_URL: "postgres://posthog:${POSTGRES_PASSWORD}@db:5432/posthog"
+  PERSONS_DB_READER_URL: "postgres://posthog:${POSTGRES_PASSWORD}@db:5432/posthog"
+  RECORDING_API_URL: "http://recording-api:6738"
+  OBJECT_STORAGE_ENABLED: "true"
+  OBJECT_STORAGE_PUBLIC_ENDPOINT: "https://${POSTHOG_DOMAIN}"
+  SESSION_RECORDING_V2_S3_ENDPOINT: "http://seaweedfs:8333"
+  SESSION_RECORDING_V2_S3_ACCESS_KEY_ID: "any"
+  SESSION_RECORDING_V2_S3_SECRET_ACCESS_KEY: "any"
+  PERSONHOG_ADDR: "personhog-router:50052"
+  PERSONHOG_ENABLED: "true"
+  FEATURE_FLAGS_SERVICE_URL: "http://feature-flags:3001"
+  # The logs product uses a dedicated ClickHouse cluster config that defaults to
+  # localhost + TLS outside DEBUG. Point it at this stack's ClickHouse over plaintext.
+  CLICKHOUSE_LOGS_CLUSTER_HOST: clickhouse
+  CLICKHOUSE_LOGS_CLUSTER_SECURE: "false"
+  BROWSERLESS_CDP_URL: "ws://browserless:3000"
+  BROWSERLESS_TOKEN: "${BROWSERLESS_SECRET}"
+  HEATMAP_BROWSERLESS_URL: "http://browserless:3000"
+  HEATMAP_BROWSERLESS_TOKEN: "${BROWSERLESS_SECRET}"
+  # Anonymous usage telemetry back to PostHog Cloud. Set OPT_OUT_CAPTURE=1 to disable.
+  OPT_OUT_CAPTURE: "${OPT_OUT_CAPTURE:-0}"
+  ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+  OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+  EMAIL_ENABLED: "${EMAIL_ENABLED:-False}"
+  EMAIL_HOST: "${EMAIL_HOST:-}"
+  EMAIL_PORT: "${EMAIL_PORT:-25}"
+  EMAIL_HOST_USER: "${EMAIL_HOST_USER:-}"
+  EMAIL_HOST_PASSWORD: "${EMAIL_HOST_PASSWORD:-}"
+  EMAIL_USE_TLS: "${EMAIL_USE_TLS:-True}"
+  EMAIL_USE_SSL: "${EMAIL_USE_SSL:-False}"
+  EMAIL_DEFAULT_FROM: "${EMAIL_DEFAULT_FROM:-}"
+
+# Shared by every plugin-server (Node) container.
+x-plugin-server-env: &plugin-server-env
+  DATABASE_URL: "postgres://posthog:${POSTGRES_PASSWORD}@db:5432/posthog"
+  PERSONS_DATABASE_URL: "postgres://posthog:${POSTGRES_PASSWORD}@db:5432/posthog"
+  BEHAVIORAL_COHORTS_DATABASE_URL: "postgres://posthog:${POSTGRES_PASSWORD}@db:5432/posthog"
+  KAFKA_HOSTS: "kafka:9092"
+  REDIS_URL: "redis://redis7:6379/"
+  CLICKHOUSE_HOST: clickhouse
+  CLICKHOUSE_DATABASE: posthog
+  CLICKHOUSE_SECURE: "false"
+  CLICKHOUSE_VERIFY: "false"
+  ENCRYPTION_SALT_KEYS: "${ENCRYPTION_SALT_KEYS}"
+  OTEL_EXPORTER_OTLP_ENDPOINT: ""
+
+configs:
+  # Path routing for PostHog's split ingestion endpoints. Traefik terminates TLS
+  # and forwards here on plain HTTP, so Caddy listens on :80 with auto_https off.
+  # X-Forwarded-For is passed through untouched so the app sees the real client IP
+  # (Traefik already set it) instead of Caddy appending Traefik's container IP.
+  caddyfile:
+    content: |
+      {
+          admin off
+          auto_https off
+          servers {
+              trusted_proxies static private_ranges
+          }
+      }
+
+      (fwd) {
+          header_up X-Forwarded-For {http.request.header.X-Forwarded-For}
+      }
+
+      :80 {
+          # Local-only liveness endpoint for the container healthcheck. Deliberately does
+          # NOT go through web: Traefik drops any container whose healthcheck fails, so a
+          # proxy health tied to web turns every web restart (migrate-on-start, ~5-10 min
+          # per redeploy) into a Traefik 404 instead of a Caddy 502.
+          @caddy-health {
+              path /-/caddy-health
+              remote_ip 127.0.0.1 ::1
+          }
+          handle @caddy-health {
+              respond "ok" 200
+          }
+
+          @replay-capture path /s /s/ /s/*
+          @capture-ai path /i/v0/ai /i/v0/ai/ /i/v0/ai/*
+          @capture path /e /e/ /e/* /i/v0 /i/v0/ /i/v0/* /i/v1/analytics/events /i/v1/analytics/events/ /batch /batch/ /batch/* /capture /capture/ /capture/*
+          @capture-logs path /i/v1/logs /i/v1/logs/ /i/v1/logs/* /i/v1/traces /i/v1/traces/ /i/v1/traces/* /i/v1/metrics /i/v1/metrics/ /i/v1/metrics/*
+          @flags path /flags /flags/ /flags/* /api/feature_flag/local_evaluation /api/feature_flag/local_evaluation/ /api/feature_flag/local_evaluation/*
+          @surveys path /surveys /surveys/ /api/surveys /api/surveys/
+          @remote-config path /array/*
+          @webhooks path /public/webhooks /public/webhooks/ /public/webhooks/* /public/m/ /public/m/*
+          @livestream path /livestream /livestream/ /livestream/*
+          @objectstorage path /posthog /posthog/ /posthog/*
+
+          handle @livestream {
+              uri strip_prefix /livestream
+              reverse_proxy livestream:8080 {
+                  import fwd
+                  flush_interval -1
+              }
+          }
+          handle @capture-ai {
+              reverse_proxy capture-ai:3000 {
+                  import fwd
+              }
+          }
+          handle @capture {
+              reverse_proxy capture:3000 {
+                  import fwd
+              }
+          }
+          handle @replay-capture {
+              reverse_proxy replay-capture:3000 {
+                  import fwd
+              }
+          }
+          handle @capture-logs {
+              reverse_proxy capture-logs:4318 {
+                  import fwd
+              }
+          }
+          handle @flags {
+              reverse_proxy feature-flags:3001 {
+                  import fwd
+              }
+          }
+          handle @surveys {
+              reverse_proxy hypercache-server:3002 {
+                  import fwd
+              }
+          }
+          handle @remote-config {
+              reverse_proxy hypercache-server:3002 {
+                  import fwd
+              }
+          }
+          handle @webhooks {
+              reverse_proxy plugins:6738 {
+                  import fwd
+              }
+          }
+          handle @objectstorage {
+              reverse_proxy objectstorage:19000
+          }
+          handle {
+              reverse_proxy web:8000 {
+                  import fwd
+              }
+          }
+      }
+
+  # CX43 sizing overlay. Loaded after config.xml (config.d/, "zz-" sorts last), so
+  # these win over PostHog's upstream values, which assume a much larger machine.
+  clickhouse_tuning:
+    content: |
+      <clickhouse>
+          <!-- Upstream leaves this to max_server_memory_usage_to_ram_ratio (0.9).
+               Pin it so ClickHouse budgets against its share of the box, not the box. -->
+          <max_server_memory_usage>${CH_MAX_SERVER_MEMORY:-2415919104}</max_server_memory_usage>
+          <!-- Upstream: 5 GiB mark cache, 8 GiB uncompressed cache. -->
+          <mark_cache_size>${CH_MARK_CACHE:-536870912}</mark_cache_size>
+          <uncompressed_cache_size>${CH_UNCOMPRESSED_CACHE:-134217728}</uncompressed_cache_size>
+          <!-- Upstream: 200 concurrent queries / 10000 threads, sized for a query cluster. -->
+          <max_concurrent_queries>${CH_MAX_CONCURRENT_QUERIES:-40}</max_concurrent_queries>
+          <max_thread_pool_size>${CH_MAX_THREAD_POOL:-2000}</max_thread_pool_size>
+          <concurrent_threads_soft_limit_num>${CH_THREADS_SOFT_LIMIT:-8}</concurrent_threads_soft_limit_num>
+          <max_connections>512</max_connections>
+          <!-- System log tables are the classic way a small ClickHouse disk fills up.
+               Keep query_log (short TTL) for debugging; drop the per-second ones. -->
+          <query_log>
+              <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+              <ttl>event_date + INTERVAL ${CH_QUERY_LOG_TTL_DAYS:-3} DAY</ttl>
+          </query_log>
+          <query_thread_log remove="1"/>
+          <query_views_log remove="1"/>
+          <text_log remove="1"/>
+          <trace_log remove="1"/>
+          <metric_log remove="1"/>
+          <query_metric_log remove="1"/>
+          <asynchronous_metric_log remove="1"/>
+          <asynchronous_insert_log remove="1"/>
+          <opentelemetry_span_log remove="1"/>
+          <session_log remove="1"/>
+          <part_log remove="1"/>
+          <processors_profile_log remove="1"/>
+          <blob_storage_log remove="1"/>
+          <backup_log remove="1"/>
+          <error_log remove="1"/>
+          <latency_log remove="1"/>
+      </clickhouse>
+
+  # Query-level limits (users.d/, merged into PostHog's users.xml default profile).
+  clickhouse_profile:
+    content: |
+      <clickhouse>
+          <profiles>
+              <default>
+                  <!-- Upstream allows 10 GB per query. Spill to disk well before
+                       ClickHouse's own budget is exhausted instead of OOM-killing. -->
+                  <max_memory_usage>${CH_MAX_MEMORY_USAGE:-1610612736}</max_memory_usage>
+                  <max_bytes_before_external_group_by>${CH_EXTERNAL_GROUP_BY:-805306368}</max_bytes_before_external_group_by>
+                  <max_bytes_before_external_sort>${CH_EXTERNAL_SORT:-805306368}</max_bytes_before_external_sort>
+                  <max_threads>${CH_MAX_THREADS:-4}</max_threads>
+                  <use_uncompressed_cache>0</use_uncompressed_cache>
+                  <log_query_threads>0</log_query_threads>
+                  <log_processors_profiles>0</log_processors_profiles>
+              </default>
+          </profiles>
+      </clickhouse>
+
+  temporal_dynamicconfig:
+    content: |
+      limit.maxIDLength:
+          - value: 255
+            constraints: {}
+      system.forceSearchAttributesCacheRefreshOnRead:
+          - value: true
+            constraints: {}
+      system.visibilityDisableOrderByClause:
+          - value: false
+            constraints: {}
+
+  livestream_config:
+    content: |
+      debug: false
+      kafka:
+          brokers: 'kafka:9092'
+          topic: 'events_plugin_ingestion'
+          group_id: 'livestream'
+          security_protocol: 'PLAINTEXT'
+          session_recording_enabled: true
+          session_recording_security_protocol: 'PLAINTEXT'
+      consumers:
+          event:
+              enabled: true
+              brokers: 'kafka:9092'
+              topic: 'events_plugin_ingestion'
+              security_protocol: 'PLAINTEXT'
+              group_id: 'livestream'
+          session_recording:
+              enabled: true
+              brokers: 'kafka:9092'
+              topic: 'session_recording_snapshot_item_events'
+              security_protocol: 'PLAINTEXT'
+              group_id: 'livestream-session-recordings'
+          notification:
+              enabled: false
+      mmdb:
+          path: '/share/GeoLite2-City.mmdb'
+
+  # --- Verbatim from PostHog (comments stripped) -----------------------------
+  # docker/clickhouse/config.xml
+  clickhouse_config:
+    content: |
+      <?xml version="1.0"?>
+      <clickhouse>
+          <logger>
+              <level>warning</level>
+              <log>/var/log/clickhouse-server/clickhouse-server.log</log>
+              <errorlog>/var/log/clickhouse-server/clickhouse-server.err.log</errorlog>
+              <size>1000M</size>
+              <count>10</count>
+          </logger>
+          <http_port>8123</http_port>
+          <mysql_port>9004</mysql_port>
+          <postgresql_port>9005</postgresql_port>
+          <https_port>8443</https_port>
+          <tcp_port_secure>9440</tcp_port_secure>
+          <interserver_http_port>9009</interserver_http_port>
+          <max_connections>4096</max_connections>
+          <keep_alive_timeout>3</keep_alive_timeout>
+          <openSSL>
+              <server>
+                  <certificateFile>/etc/clickhouse-server/server.crt</certificateFile>
+                  <privateKeyFile>/etc/clickhouse-server/server.key</privateKeyFile>
+                  <dhParamsFile>/etc/clickhouse-server/dhparam.pem</dhParamsFile>
+                  <verificationMode>none</verificationMode>
+                  <loadDefaultCAFile>true</loadDefaultCAFile>
+                  <cacheSessions>true</cacheSessions>
+                  <disableProtocols>sslv2,sslv3</disableProtocols>
+                  <preferServerCiphers>true</preferServerCiphers>
+              </server>
+              <client>
+                  <loadDefaultCAFile>true</loadDefaultCAFile>
+                  <cacheSessions>true</cacheSessions>
+                  <disableProtocols>sslv2,sslv3</disableProtocols>
+                  <preferServerCiphers>true</preferServerCiphers>
+                  <invalidCertificateHandler>
+                      <name>RejectCertificateHandler</name>
+                  </invalidCertificateHandler>
+              </client>
+          </openSSL>
+          <max_concurrent_queries>200</max_concurrent_queries>
+          <max_server_memory_usage>0</max_server_memory_usage>
+          <background_message_broker_schedule_pool_size>128</background_message_broker_schedule_pool_size>
+          <max_thread_pool_size>10000</max_thread_pool_size>
+          <background_pool_size>4</background_pool_size>
+          <background_merges_mutations_concurrency_ratio>8</background_merges_mutations_concurrency_ratio>
+          <max_server_memory_usage_to_ram_ratio>0.9</max_server_memory_usage_to_ram_ratio>
+          <total_memory_profiler_step>4194304</total_memory_profiler_step>
+          <total_memory_tracker_sample_probability>0</total_memory_tracker_sample_probability>
+          <uncompressed_cache_size>8589934592</uncompressed_cache_size>
+          <mark_cache_size>5368709120</mark_cache_size>
+          <mmap_cache_size>1000</mmap_cache_size>
+          <compiled_expression_cache_size>134217728</compiled_expression_cache_size>
+          <compiled_expression_cache_elements_size>10000</compiled_expression_cache_elements_size>
+          <path>/var/lib/clickhouse/</path>
+          <tmp_path>/var/lib/clickhouse/tmp/</tmp_path>
+          <user_files_path>/var/lib/clickhouse/user_files/</user_files_path>
+          <user_directories>
+              <users_xml>
+                  <path>users.xml</path>
+              </users_xml>
+              <local_directory>
+                  <path>/var/lib/clickhouse/access/</path>
+              </local_directory>
+          </user_directories>
+          <default_profile>default</default_profile>
+          <custom_settings_prefixes></custom_settings_prefixes>
+          <default_database>default</default_database>
+          <mlock_executable>true</mlock_executable>
+          <remap_executable>false</remap_executable>
+          <remote_url_allow_hosts>
+              <host_regexp>.*</host_regexp>
+          </remote_url_allow_hosts>
+          <zookeeper>
+              <node>
+                  <host>zookeeper</host>
+                  <port>2181</port>
+              </node>
+          </zookeeper>
+          <builtin_dictionaries_reload_interval>3600</builtin_dictionaries_reload_interval>
+          <max_session_timeout>3600</max_session_timeout>
+          <default_session_timeout>60</default_session_timeout>
+          <query_log>
+              <database>system</database>
+              <table>query_log</table>
+              <partition_by>toYYYYMM(event_date)</partition_by>
+              <flush_interval_milliseconds>500</flush_interval_milliseconds>
+              <max_size_rows>8388608</max_size_rows>
+              <reserved_size_rows>8192</reserved_size_rows>
+              <buffer_size_rows_flush_threshold>524288</buffer_size_rows_flush_threshold>
+              <flush_on_crash>true</flush_on_crash>
+              <ttl>event_date + INTERVAL 12 DAY</ttl>
+              <ttl_only_drop_parts>1</ttl_only_drop_parts>
+          </query_log>
+          <query_thread_log>
+              <database>system</database>
+              <table>query_thread_log</table>
+              <partition_by>toYYYYMM(event_date)</partition_by>
+              <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+              <max_size_rows>8388608</max_size_rows>
+              <reserved_size_rows>8192</reserved_size_rows>
+              <buffer_size_rows_flush_threshold>524288</buffer_size_rows_flush_threshold>
+              <flush_on_crash>false</flush_on_crash>
+              <ttl>event_date + INTERVAL 5 DAY</ttl>
+              <ttl_only_drop_parts>1</ttl_only_drop_parts>
+          </query_thread_log>
+          <query_views_log>
+              <database>system</database>
+              <table>query_views_log</table>
+              <partition_by>toYYYYMM(event_date)</partition_by>
+              <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+              <ttl>event_date + INTERVAL 5 DAY</ttl>
+              <ttl_only_drop_parts>1</ttl_only_drop_parts>
+          </query_views_log>
+          <text_log>
+              <database>system</database>
+              <table>text_log</table>
+              <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+              <level>trace</level>
+              <ttl>event_date + INTERVAL 5 DAY</ttl>
+              <ttl_only_drop_parts>1</ttl_only_drop_parts>
+          </text_log>
+          <metric_log>
+              <database>system</database>
+              <table>metric_log</table>
+              <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+              <collect_interval_milliseconds>1000</collect_interval_milliseconds>
+              <ttl>event_date + INTERVAL 5 DAY</ttl>
+              <ttl_only_drop_parts>1</ttl_only_drop_parts>
+          </metric_log>
+          <asynchronous_metric_log>
+              <database>system</database>
+              <table>asynchronous_metric_log</table>
+              <flush_interval_milliseconds>7000</flush_interval_milliseconds>
+              <ttl>event_date + INTERVAL 5 DAY</ttl>
+              <ttl_only_drop_parts>1</ttl_only_drop_parts>
+          </asynchronous_metric_log>
+          <opentelemetry_span_log>
+              <engine>
+                  engine MergeTree
+                  partition by toYYYYMM(finish_date)
+                  order by (finish_date, finish_time_us, trace_id)
+              </engine>
+              <database>system</database>
+              <table>opentelemetry_span_log</table>
+              <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+          </opentelemetry_span_log>
+          <crash_log>
+              <database>system</database>
+              <table>crash_log</table>
+              <partition_by />
+              <flush_interval_milliseconds>1000</flush_interval_milliseconds>
+              <max_size_rows>1024</max_size_rows>
+              <reserved_size_rows>1024</reserved_size_rows>
+              <buffer_size_rows_flush_threshold>512</buffer_size_rows_flush_threshold>
+              <flush_on_crash>true</flush_on_crash>
+          </crash_log>
+          <session_log>
+              <database>system</database>
+              <table>session_log</table>
+              <partition_by>toYYYYMM(event_date)</partition_by>
+              <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+              <ttl>event_date + INTERVAL 5 DAY</ttl>
+              <ttl_only_drop_parts>1</ttl_only_drop_parts>
+          </session_log>
+          <backup_log>
+              <database>system</database>
+              <table>backup_log</table>
+              <partition_by>toYYYYMM(event_date)</partition_by>
+              <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+              <ttl>event_date + INTERVAL 5 DAY</ttl>
+              <ttl_only_drop_parts>1</ttl_only_drop_parts>
+          </backup_log>
+          <top_level_domains_lists>
+          </top_level_domains_lists>
+          <dictionaries_config>*_dictionary.xml</dictionaries_config>
+          <user_defined_executable_functions_config>*_function.xml</user_defined_executable_functions_config>
+          <distributed_ddl>
+              <path>/clickhouse/task_queue/ddl</path>
+          </distributed_ddl>
+          <graphite_rollup_example>
+              <pattern>
+                  <regexp>click_cost</regexp>
+                  <function>any</function>
+                  <retention>
+                      <age>0</age>
+                      <precision>3600</precision>
+                  </retention>
+                  <retention>
+                      <age>86400</age>
+                      <precision>60</precision>
+                  </retention>
+              </pattern>
+              <default>
+                  <function>max</function>
+                  <retention>
+                      <age>0</age>
+                      <precision>60</precision>
+                  </retention>
+                  <retention>
+                      <age>3600</age>
+                      <precision>300</precision>
+                  </retention>
+                  <retention>
+                      <age>86400</age>
+                      <precision>3600</precision>
+                  </retention>
+              </default>
+          </graphite_rollup_example>
+          <format_schema_path>/var/lib/clickhouse/format_schemas/</format_schema_path>
+          <query_masking_rules>
+              <rule>
+                  <name>hide encrypt/decrypt arguments</name>
+                  <regexp>((?:aes_)?(?:encrypt|decrypt)(?:_mysql)?)\s*\(\s*(?:'(?:\\'|.)+'|.*?)\s*\)</regexp>
+                  <replace>\1(???)</replace>
+              </rule>
+          </query_masking_rules>
+          <merge_tree>
+              <max_bytes_to_merge_at_max_space_in_pool>1073741824</max_bytes_to_merge_at_max_space_in_pool>
+              <number_of_free_entries_in_pool_to_execute_mutation>2</number_of_free_entries_in_pool_to_execute_mutation>
+              <number_of_free_entries_in_pool_to_execute_optimize_entire_partition>2</number_of_free_entries_in_pool_to_execute_optimize_entire_partition>
+          </merge_tree>
+      </clickhouse>
+
+  # docker/clickhouse/users.xml
+  clickhouse_users:
+    content: |
+      <?xml version="1.0"?>
+      <yandex>
+          <profiles>
+              <default>
+                  <max_memory_usage>10000000000</max_memory_usage>
+                  <load_balancing>random</load_balancing>
+                  <allow_nondeterministic_mutations>1</allow_nondeterministic_mutations>
+                  <compatibility>26.3</compatibility>
+                  <enable_materialized_cte>1</enable_materialized_cte>
+                  <async_insert>0</async_insert>
+                  <optimize_empty_string_comparisons>0</optimize_empty_string_comparisons>
+                  <distributed_product_mode>global</distributed_product_mode>
+                  <enable_parallel_replicas>0</enable_parallel_replicas>
+                  <max_parallel_replicas>1</max_parallel_replicas>
+                  <allow_experimental_window_functions>1</allow_experimental_window_functions>
+                  <allow_suspicious_low_cardinality_types>1</allow_suspicious_low_cardinality_types>
+                  <insert_distributed_sync>1</insert_distributed_sync>
+                  <throw_on_max_partitions_per_insert_block>false</throw_on_max_partitions_per_insert_block>
+                  <number_of_mutations_to_throw>1</number_of_mutations_to_throw>
+              </default>
+              <readonly>
+                  <readonly>1</readonly>
+              </readonly>
+              <api>
+                  <profile>default</profile>
+              </api>
+              <app>
+                  <profile>default</profile>
+              </app>
+          </profiles>
+          <users>
+              <default>
+                  <password></password>
+                  <networks>
+                      <ip>::/0</ip>
+                  </networks>
+                  <profile>default</profile>
+                  <quota>default</quota>
+                  <access_management>1</access_management>
+                  <named_collection_control>1</named_collection_control>
+                  <show_named_collections>1</show_named_collections>
+                  <show_named_collections_secrets>1</show_named_collections_secrets>
+              </default>
+              <api>
+                  <password>apipass</password>
+                  <networks>
+                      <ip>::/0</ip>
+                  </networks>
+                  <profile>api</profile>
+                  <quota>default</quota>
+              </api>
+              <app>
+                  <password>apppass</password>
+                  <networks>
+                      <ip>::/0</ip>
+                  </networks>
+                  <profile>app</profile>
+                  <quota>default</quota>
+              </app>
+              <dict_reader>
+                  <password>dictreaderpass</password>
+                  <networks>
+                      <ip>::/0</ip>
+                  </networks>
+                  <profile>readonly</profile>
+                  <quota>default</quota>
+                  <access_management>0</access_management>
+                  <grants>
+                      <query>GRANT SELECT ON default.*</query>
+                      <query>GRANT SELECT ON posthog.*</query>
+                      <query>GRANT SELECT ON posthog_test.*</query>
+                  </grants>
+              </dict_reader>
+          </users>
+          <quotas>
+              <default>
+                  <interval>
+                      <duration>3600</duration>
+                      <queries>0</queries>
+                      <errors>0</errors>
+                      <result_rows>0</result_rows>
+                      <read_rows>0</read_rows>
+                      <execution_time>0</execution_time>
+                  </interval>
+              </default>
+          </quotas>
+      </yandex>
+
+  # docker/clickhouse/config.d/default.xml
+  clickhouse_cluster:
+    content: |
+      <clickhouse>
+          <tcp_port>9000</tcp_port>
+          <remote_servers>
+              <posthog>
+                  <shard>
+                      <replica>
+                          <host>clickhouse</host>
+                          <port>9000</port>
+                      </replica>
+                  </shard>
+              </posthog>
+              <posthog_single_shard>
+                  <shard>
+                      <replica>
+                          <host>clickhouse</host>
+                          <port>9000</port>
+                      </replica>
+                  </shard>
+              </posthog_single_shard>
+              <posthog_migrations>
+                  <shard>
+                      <replica>
+                          <host>clickhouse</host>
+                          <port>9000</port>
+                      </replica>
+                  </shard>
+              </posthog_migrations>
+              <posthog_writable>
+                  <shard>
+                      <replica>
+                          <host>clickhouse</host>
+                          <port>9000</port>
+                      </replica>
+                  </shard>
+              </posthog_writable>
+              <posthog_primary_replica>
+                  <shard>
+                      <replica>
+                          <host>clickhouse</host>
+                          <port>9000</port>
+                      </replica>
+                  </shard>
+              </posthog_primary_replica>
+              <ai_events>
+                  <shard>
+                      <replica>
+                          <host>clickhouse</host>
+                          <port>9000</port>
+                      </replica>
+                  </shard>
+              </ai_events>
+              <aux>
+                  <shard>
+                      <replica>
+                          <host>clickhouse</host>
+                          <port>9000</port>
+                      </replica>
+                  </shard>
+              </aux>
+              <ops>
+                  <shard>
+                      <replica>
+                          <host>clickhouse</host>
+                          <port>9000</port>
+                      </replica>
+                  </shard>
+              </ops>
+              <sessions>
+                  <shard>
+                      <replica>
+                          <host>clickhouse</host>
+                          <port>9000</port>
+                      </replica>
+                  </shard>
+              </sessions>
+          </remote_servers>
+          <named_collections>
+              <msk_cluster>
+                  <kafka_broker_list from_env="KAFKA_HOSTS"/>
+              </msk_cluster>
+              <warpstream_ingestion>
+                  <kafka_broker_list from_env="KAFKA_HOSTS"/>
+              </warpstream_ingestion>
+              <warpstream_calculated_events>
+                  <kafka_broker_list from_env="KAFKA_HOSTS"/>
+              </warpstream_calculated_events>
+              <warpstream_replay>
+                  <kafka_broker_list from_env="KAFKA_HOSTS"/>
+              </warpstream_replay>
+              <warpstream_shared>
+                  <kafka_broker_list from_env="KAFKA_HOSTS"/>
+              </warpstream_shared>
+              <warpstream_cyclotron>
+                  <kafka_broker_list from_env="KAFKA_HOSTS"/>
+              </warpstream_cyclotron>
+              <warpstream_logs>
+                  <kafka_broker_list from_env="KAFKA_HOSTS"/>
+              </warpstream_logs>
+              <warpstream_traces>
+                  <kafka_broker_list from_env="KAFKA_HOSTS"/>
+              </warpstream_traces>
+              <warpstream_metrics>
+                  <kafka_broker_list from_env="KAFKA_HOSTS"/>
+              </warpstream_metrics>
+          </named_collections>
+          <macros>
+              <shard>01</shard>
+              <replica>ch1</replica>
+              <hostClusterType>online</hostClusterType>
+              <hostClusterRole>data</hostClusterRole>
+          </macros>
+      </clickhouse>
+
+  # docker/clickhouse/user_defined_function.xml
+  clickhouse_udf:
+    content: |
+      <functions>
+          <function>
+              <type>executable_pool</type>
+              <name>aggregate_funnel</name>
+              <return_type>Array(Tuple(Int8, Nullable(String), Array(Float64), Array(Array(UUID)), UInt32))</return_type>
+              <return_name>result</return_name>
+              <argument>
+                  <type>UInt8</type>
+                  <name>num_steps</name>
+              </argument>
+              <argument>
+                  <type>UInt64</type>
+                  <name>conversion_window_limit</name>
+              </argument>
+              <argument>
+                  <type>String</type>
+                  <name>breakdown_attribution_type</name>
+              </argument>
+              <argument>
+                  <type>String</type>
+                  <name>funnel_order_type</name>
+              </argument>
+              <argument>
+                  <type>Array(Nullable(String))</type>
+                  <name>prop_vals</name>
+              </argument>
+              <argument>
+                  <type>Array(Int8)</type>
+                  <name>optional_steps</name>
+              </argument>
+              <argument>
+                  <type>Array(Tuple(Nullable(Float64), UUID, Nullable(String), Array(Int8)))</type>
+                  <name>value</name>
+              </argument>
+              <format>RowBinaryWithNamesAndTypes</format>
+              <send_chunk_header>true</send_chunk_header>
+              <stderr_reaction>throw</stderr_reaction>
+              <command>aggregate_funnel steps --variant=plain</command>
+              <lifetime>600</lifetime>
+          </function>
+          <function>
+              <type>executable_pool</type>
+              <name>aggregate_funnel_cohort</name>
+              <return_type>Array(Tuple(Int8, UInt64, Array(Float64), Array(Array(UUID)), UInt32))</return_type>
+              <return_name>result</return_name>
+              <argument>
+                  <type>UInt8</type>
+                  <name>num_steps</name>
+              </argument>
+              <argument>
+                  <type>UInt64</type>
+                  <name>conversion_window_limit</name>
+              </argument>
+              <argument>
+                  <type>String</type>
+                  <name>breakdown_attribution_type</name>
+              </argument>
+              <argument>
+                  <type>String</type>
+                  <name>funnel_order_type</name>
+              </argument>
+              <argument>
+                  <type>Array(UInt64)</type>
+                  <name>prop_vals</name>
+              </argument>
+              <argument>
+                  <type>Array(Int8)</type>
+                  <name>optional_steps</name>
+              </argument>
+              <argument>
+                  <type>Array(Tuple(Nullable(Float64), UUID, UInt64, Array(Int8)))</type>
+                  <name>value</name>
+              </argument>
+              <format>RowBinaryWithNamesAndTypes</format>
+              <send_chunk_header>true</send_chunk_header>
+              <stderr_reaction>throw</stderr_reaction>
+              <command>aggregate_funnel steps --variant=cohort</command>
+              <lifetime>600</lifetime>
+          </function>
+          <function>
+              <type>executable_pool</type>
+              <name>aggregate_funnel_array</name>
+              <return_type>Array(Tuple(Int8, Array(String), Array(Float64), Array(Array(UUID)), UInt32))</return_type>
+              <return_name>result</return_name>
+              <argument>
+                  <type>UInt8</type>
+                  <name>num_steps</name>
+              </argument>
+              <argument>
+                  <type>UInt64</type>
+                  <name>conversion_window_limit</name>
+              </argument>
+              <argument>
+                  <type>String</type>
+                  <name>breakdown_attribution_type</name>
+              </argument>
+              <argument>
+                  <type>String</type>
+                  <name>funnel_order_type</name>
+              </argument>
+              <argument>
+                  <type>Array(Array(String))</type>
+                  <name>prop_vals</name>
+              </argument>
+              <argument>
+                  <type>Array(Int8)</type>
+                  <name>optional_steps</name>
+              </argument>
+              <argument>
+                  <type>Array(Tuple(Nullable(Float64), UUID, Array(String), Array(Int8)))</type>
+                  <name>value</name>
+              </argument>
+              <format>RowBinaryWithNamesAndTypes</format>
+              <send_chunk_header>true</send_chunk_header>
+              <stderr_reaction>throw</stderr_reaction>
+              <command>aggregate_funnel steps --variant=array</command>
+              <lifetime>600</lifetime>
+          </function>
+          <function>
+              <type>executable_pool</type>
+              <name>aggregate_funnel_trends</name>
+              <return_type>Array(Tuple(UInt64, Int8, Nullable(String), UUID))</return_type>
+              <return_name>result</return_name>
+              <argument>
+                  <type>UInt8</type>
+                  <name>from_step</name>
+              </argument>
+              <argument>
+                  <type>UInt8</type>
+                  <name>to_step</name>
+              </argument>
+              <argument>
+                  <type>UInt8</type>
+                  <name>num_steps</name>
+              </argument>
+              <argument>
+                  <type>UInt64</type>
+                  <name>conversion_window_limit</name>
+              </argument>
+              <argument>
+                  <type>String</type>
+                  <name>breakdown_attribution_type</name>
+              </argument>
+              <argument>
+                  <type>String</type>
+                  <name>funnel_order_type</name>
+              </argument>
+              <argument>
+                  <type>Array(Nullable(String))</type>
+                  <name>prop_vals</name>
+              </argument>
+              <argument>
+                  <type>Array(Tuple(Nullable(Float64), UInt64, UUID, Nullable(String), Array(Int8)))</type>
+                  <name>value</name>
+              </argument>
+              <format>RowBinaryWithNamesAndTypes</format>
+              <send_chunk_header>true</send_chunk_header>
+              <stderr_reaction>throw</stderr_reaction>
+              <command>aggregate_funnel trends --variant=plain</command>
+              <lifetime>600</lifetime>
+          </function>
+          <function>
+              <type>executable_pool</type>
+              <name>aggregate_funnel_array_trends</name>
+              <return_type>Array(Tuple(UInt64, Int8, Array(String), UUID))</return_type>
+              <return_name>result</return_name>
+              <argument>
+                  <type>UInt8</type>
+                  <name>from_step</name>
+              </argument>
+              <argument>
+                  <type>UInt8</type>
+                  <name>to_step</name>
+              </argument>
+              <argument>
+                  <type>UInt8</type>
+                  <name>num_steps</name>
+              </argument>
+              <argument>
+                  <type>UInt64</type>
+                  <name>conversion_window_limit</name>
+              </argument>
+              <argument>
+                  <type>String</type>
+                  <name>breakdown_attribution_type</name>
+              </argument>
+              <argument>
+                  <type>String</type>
+                  <name>funnel_order_type</name>
+              </argument>
+              <argument>
+                  <type>Array(Array(String))</type>
+                  <name>prop_vals</name>
+              </argument>
+              <argument>
+                  <type>Array(Tuple(Nullable(Float64), UInt64, UUID, Array(String), Array(Int8)))</type>
+                  <name>value</name>
+              </argument>
+              <format>RowBinaryWithNamesAndTypes</format>
+              <send_chunk_header>true</send_chunk_header>
+              <stderr_reaction>throw</stderr_reaction>
+              <command>aggregate_funnel trends --variant=array</command>
+              <lifetime>600</lifetime>
+          </function>
+          <function>
+              <type>executable_pool</type>
+              <name>aggregate_funnel_cohort_trends</name>
+              <return_type>Array(Tuple(UInt64, Int8, UInt64, UUID))</return_type>
+              <return_name>result</return_name>
+              <argument>
+                  <type>UInt8</type>
+                  <name>from_step</name>
+              </argument>
+              <argument>
+                  <type>UInt8</type>
+                  <name>to_step</name>
+              </argument>
+              <argument>
+                  <type>UInt8</type>
+                  <name>num_steps</name>
+              </argument>
+              <argument>
+                  <type>UInt64</type>
+                  <name>conversion_window_limit</name>
+              </argument>
+              <argument>
+                  <type>String</type>
+                  <name>breakdown_attribution_type</name>
+              </argument>
+              <argument>
+                  <type>String</type>
+                  <name>funnel_order_type</name>
+              </argument>
+              <argument>
+                  <type>Array(UInt64)</type>
+                  <name>prop_vals</name>
+              </argument>
+              <argument>
+                  <type>Array(Tuple(Nullable(Float64), UInt64, UUID, UInt64, Array(Int8)))</type>
+                  <name>value</name>
+              </argument>
+              <format>RowBinaryWithNamesAndTypes</format>
+              <send_chunk_header>true</send_chunk_header>
+              <stderr_reaction>throw</stderr_reaction>
+              <command>aggregate_funnel trends --variant=cohort</command>
+              <lifetime>600</lifetime>
+          </function>
+          <function>
+              <type>executable_pool</type>
+              <name>aggregate_funnel_json</name>
+              <return_type>Array(Tuple(Int8, Nullable(String), Array(Float64), Array(Array(UUID)), UInt32))</return_type>
+              <return_name>result</return_name>
+              <argument>
+                  <type>UInt8</type>
+                  <name>num_steps</name>
+              </argument>
+              <argument>
+                  <type>UInt64</type>
+                  <name>conversion_window_limit</name>
+              </argument>
+              <argument>
+                  <type>String</type>
+                  <name>breakdown_attribution_type</name>
+              </argument>
+              <argument>
+                  <type>String</type>
+                  <name>funnel_order_type</name>
+              </argument>
+              <argument>
+                  <type>Array(Nullable(String))</type>
+                  <name>prop_vals</name>
+              </argument>
+              <argument>
+                  <type>Array(Int8)</type>
+                  <name>optional_steps</name>
+              </argument>
+              <argument>
+                  <type>Array(Tuple(Nullable(Float64), UUID, Nullable(String), Array(Int8)))</type>
+                  <name>value</name>
+              </argument>
+              <format>JSONEachRow</format>
+              <stderr_reaction>throw</stderr_reaction>
+              <command>aggregate_funnel steps --json --variant=plain</command>
+              <lifetime>600</lifetime>
+          </function>
+          <function>
+              <type>executable_pool</type>
+              <name>aggregate_funnel_cohort_json</name>
+              <return_type>Array(Tuple(Int8, UInt64, Array(Float64), Array(Array(UUID)), UInt32))</return_type>
+              <return_name>result</return_name>
+              <argument>
+                  <type>UInt8</type>
+                  <name>num_steps</name>
+              </argument>
+              <argument>
+                  <type>UInt64</type>
+                  <name>conversion_window_limit</name>
+              </argument>
+              <argument>
+                  <type>String</type>
+                  <name>breakdown_attribution_type</name>
+              </argument>
+              <argument>
+                  <type>String</type>
+                  <name>funnel_order_type</name>
+              </argument>
+              <argument>
+                  <type>Array(UInt64)</type>
+                  <name>prop_vals</name>
+              </argument>
+              <argument>
+                  <type>Array(Int8)</type>
+                  <name>optional_steps</name>
+              </argument>
+              <argument>
+                  <type>Array(Tuple(Nullable(Float64), UUID, UInt64, Array(Int8)))</type>
+                  <name>value</name>
+              </argument>
+              <format>JSONEachRow</format>
+              <stderr_reaction>throw</stderr_reaction>
+              <command>aggregate_funnel steps --json --variant=cohort</command>
+              <lifetime>600</lifetime>
+          </function>
+          <function>
+              <type>executable_pool</type>
+              <name>aggregate_funnel_array_json</name>
+              <return_type>Array(Tuple(Int8, Array(String), Array(Float64), Array(Array(UUID)), UInt32))</return_type>
+              <return_name>result</return_name>
+              <argument>
+                  <type>UInt8</type>
+                  <name>num_steps</name>
+              </argument>
+              <argument>
+                  <type>UInt64</type>
+                  <name>conversion_window_limit</name>
+              </argument>
+              <argument>
+                  <type>String</type>
+                  <name>breakdown_attribution_type</name>
+              </argument>
+              <argument>
+                  <type>String</type>
+                  <name>funnel_order_type</name>
+              </argument>
+              <argument>
+                  <type>Array(Array(String))</type>
+                  <name>prop_vals</name>
+              </argument>
+              <argument>
+                  <type>Array(Int8)</type>
+                  <name>optional_steps</name>
+              </argument>
+              <argument>
+                  <type>Array(Tuple(Nullable(Float64), UUID, Array(String), Array(Int8)))</type>
+                  <name>value</name>
+              </argument>
+              <format>JSONEachRow</format>
+              <stderr_reaction>throw</stderr_reaction>
+              <command>aggregate_funnel steps --json --variant=array</command>
+              <lifetime>600</lifetime>
+          </function>
+          <function>
+              <type>executable_pool</type>
+              <name>aggregate_funnel_trends_json</name>
+              <return_type>Array(Tuple(UInt64, Int8, Nullable(String), UUID))</return_type>
+              <return_name>result</return_name>
+              <argument>
+                  <type>UInt8</type>
+                  <name>from_step</name>
+              </argument>
+              <argument>
+                  <type>UInt8</type>
+                  <name>to_step</name>
+              </argument>
+              <argument>
+                  <type>UInt8</type>
+                  <name>num_steps</name>
+              </argument>
+              <argument>
+                  <type>UInt64</type>
+                  <name>conversion_window_limit</name>
+              </argument>
+              <argument>
+                  <type>String</type>
+                  <name>breakdown_attribution_type</name>
+              </argument>
+              <argument>
+                  <type>String</type>
+                  <name>funnel_order_type</name>
+              </argument>
+              <argument>
+                  <type>Array(Nullable(String))</type>
+                  <name>prop_vals</name>
+              </argument>
+              <argument>
+                  <type>Array(Tuple(Nullable(Float64), UInt64, UUID, Nullable(String), Array(Int8)))</type>
+                  <name>value</name>
+              </argument>
+              <format>JSONEachRow</format>
+              <stderr_reaction>throw</stderr_reaction>
+              <command>aggregate_funnel trends --json --variant=plain</command>
+              <lifetime>600</lifetime>
+          </function>
+          <function>
+              <type>executable_pool</type>
+              <name>aggregate_funnel_array_trends_json</name>
+              <return_type>Array(Tuple(UInt64, Int8, Array(String), UUID))</return_type>
+              <return_name>result</return_name>
+              <argument>
+                  <type>UInt8</type>
+                  <name>from_step</name>
+              </argument>
+              <argument>
+                  <type>UInt8</type>
+                  <name>to_step</name>
+              </argument>
+              <argument>
+                  <type>UInt8</type>
+                  <name>num_steps</name>
+              </argument>
+              <argument>
+                  <type>UInt64</type>
+                  <name>conversion_window_limit</name>
+              </argument>
+              <argument>
+                  <type>String</type>
+                  <name>breakdown_attribution_type</name>
+              </argument>
+              <argument>
+                  <type>String</type>
+                  <name>funnel_order_type</name>
+              </argument>
+              <argument>
+                  <type>Array(Array(String))</type>
+                  <name>prop_vals</name>
+              </argument>
+              <argument>
+                  <type>Array(Tuple(Nullable(Float64), UInt64, UUID, Array(String), Array(Int8)))</type>
+                  <name>value</name>
+              </argument>
+              <format>JSONEachRow</format>
+              <stderr_reaction>throw</stderr_reaction>
+              <command>aggregate_funnel trends --json --variant=array</command>
+              <lifetime>600</lifetime>
+          </function>
+          <function>
+              <type>executable_pool</type>
+              <name>aggregate_funnel_cohort_trends_json</name>
+              <return_type>Array(Tuple(UInt64, Int8, UInt64, UUID))</return_type>
+              <return_name>result</return_name>
+              <argument>
+                  <type>UInt8</type>
+                  <name>from_step</name>
+              </argument>
+              <argument>
+                  <type>UInt8</type>
+                  <name>to_step</name>
+              </argument>
+              <argument>
+                  <type>UInt8</type>
+                  <name>num_steps</name>
+              </argument>
+              <argument>
+                  <type>UInt64</type>
+                  <name>conversion_window_limit</name>
+              </argument>
+              <argument>
+                  <type>String</type>
+                  <name>breakdown_attribution_type</name>
+              </argument>
+              <argument>
+                  <type>String</type>
+                  <name>funnel_order_type</name>
+              </argument>
+              <argument>
+                  <type>Array(UInt64)</type>
+                  <name>prop_vals</name>
+              </argument>
+              <argument>
+                  <type>Array(Tuple(Nullable(Float64), UInt64, UUID, UInt64, Array(Int8)))</type>
+                  <name>value</name>
+              </argument>
+              <format>JSONEachRow</format>
+              <stderr_reaction>throw</stderr_reaction>
+              <command>aggregate_funnel trends --json --variant=cohort</command>
+              <lifetime>600</lifetime>
+          </function>
+          <function>
+              <type>executable_pool</type>
+              <name>aggregate_funnel_test</name>
+              <return_type>String</return_type>
+              <return_name>result</return_name>
+              <argument>
+                  <type>UInt8</type>
+                  <name>num_steps</name>
+              </argument>
+              <argument>
+                  <type>UInt64</type>
+                  <name>conversion_window_limit</name>
+              </argument>
+              <argument>
+                  <type>String</type>
+                  <name>breakdown_attribution_type</name>
+              </argument>
+              <argument>
+                  <type>String</type>
+                  <name>funnel_order_type</name>
+              </argument>
+              <argument>
+                  <type>Array(Array(String))</type>
+                  <name>prop_vals</name>
+              </argument>
+              <argument>
+                  <type>Array(Int8)</type>
+                  <name>optional_steps</name>
+              </argument>
+              <argument>
+                  <type>Array(Tuple(Nullable(Float64), UUID, Nullable(String), Array(Int8)))</type>
+                  <name>value</name>
+              </argument>
+              <format>JSONEachRow</format>
+              <stderr_reaction>throw</stderr_reaction>
+              <command>aggregate_funnel_test.py</command>
+              <lifetime>600</lifetime>
+          </function>
+          <function>
+              <type>executable_pool</type>
+              <name>aggregate_funnel_array_trends_test</name>
+              <return_type>String</return_type>
+              <return_name>result</return_name>
+              <argument>
+                  <type>UInt8</type>
+                  <name>from_step</name>
+              </argument>
+              <argument>
+                  <type>UInt8</type>
+                  <name>to_step</name>
+              </argument>
+              <argument>
+                  <type>UInt8</type>
+                  <name>num_steps</name>
+              </argument>
+              <argument>
+                  <type>UInt64</type>
+                  <name>conversion_window_limit</name>
+              </argument>
+              <argument>
+                  <type>String</type>
+                  <name>breakdown_attribution_type</name>
+              </argument>
+              <argument>
+                  <type>String</type>
+                  <name>funnel_order_type</name>
+              </argument>
+              <argument>
+                  <type>Array(Array(String))</type>
+                  <name>prop_vals</name>
+              </argument>
+              <argument>
+                  <type>Array(Tuple(Nullable(Float64), UInt64, UUID, Array(String), Array(Int8)))</type>
+                  <name>value</name>
+              </argument>
+              <format>JSONEachRow</format>
+              <stderr_reaction>throw</stderr_reaction>
+              <command>aggregate_funnel_array_trends_test.py</command>
+              <lifetime>600</lifetime>
+          </function>
+          <function>
+              <type>executable</type>
+              <name>JSONDropKeys</name>
+              <return_type>String</return_type>
+              <argument>
+                  <type>String</type>
+              </argument>
+              <format>Raw</format>
+              <command>json_drop_keys_udf {keys_parameter:Array(String)}</command>
+          </function>
+      </functions>
+
+services:
+  # ---------------------------------------------------------------------------
+  # Edge: Caddy does PostHog's path routing (capture / flags / replay / app).
+  # Traefik terminates TLS and forwards plain HTTP here.
+  # ---------------------------------------------------------------------------
+  proxy:
+    image: caddy:2.10-alpine
+    container_name: ${CONTAINER_PREFIX}-proxy
+    restart: unless-stopped
+    expose:
+      - "80"
+    networks:
+      - default
+      - dokploy-network
+    configs:
+      - source: caddyfile
+        target: /etc/caddy/Caddyfile
+    volumes:
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - web
+      - capture
+      - replay-capture
+      - feature-flags
+      - hypercache-server
+      - livestream
+    healthcheck:
+      # Caddy's own liveness, not web's — see the @caddy-health block in the Caddyfile.
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:80/-/caddy-health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: ${MEM_PROXY:-192M}
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------
+  # One-shot: lifts ClickHouse UDF binaries, protobuf schemas and the GeoIP
+  # database out of the PostHog app image, so they always match POSTHOG_APP_TAG.
+  # (Upstream hobby git-clones the repo and curls the mmdb instead.)
+  # ---------------------------------------------------------------------------
+  assets:
+    image: posthog/posthog:${POSTHOG_APP_TAG}
+    container_name: ${CONTAINER_PREFIX}-assets
+    restart: "no"
+    user: root
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -euo pipefail
+        rm -rf /assets/user_scripts /assets/idl
+        cp -a /code/posthog/user_scripts /assets/user_scripts
+        cp -a /code/posthog/idl /assets/idl
+        cp -a /code/posthog/user_scripts/latest_user_defined_function.xml /assets/
+        chmod -R a+rX /assets
+        cp -a /code/share/GeoLite2-City.mmdb /share/GeoLite2-City.mmdb
+        chmod a+r /share/GeoLite2-City.mmdb
+        echo "assets ready"
+    volumes:
+      - posthog-assets:/assets
+      - posthog-share:/share
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------
+  # Data layer
+  # ---------------------------------------------------------------------------
+  db:
+    image: postgres:15.12-alpine
+    container_name: ${CONTAINER_PREFIX}-db
+    restart: unless-stopped
+    command:
+      - -c
+      - max_connections=${PG_MAX_CONNECTIONS:-200}
+      - -c
+      - shared_buffers=${PG_SHARED_BUFFERS:-1GB}
+      - -c
+      - effective_cache_size=${PG_EFFECTIVE_CACHE_SIZE:-3GB}
+      - -c
+      - work_mem=${PG_WORK_MEM:-8MB}
+      - -c
+      - maintenance_work_mem=${PG_MAINTENANCE_WORK_MEM:-256MB}
+      - -c
+      - checkpoint_completion_target=0.9
+      - -c
+      - checkpoint_timeout=15min
+      - -c
+      - max_wal_size=${PG_MAX_WAL_SIZE:-2GB}
+      - -c
+      - min_wal_size=512MB
+      - -c
+      - wal_buffers=16MB
+      # NVMe: random reads cost about the same as sequential, and the queue is deep.
+      - -c
+      - random_page_cost=1.1
+      - -c
+      - effective_io_concurrency=200
+      - -c
+      - max_worker_processes=8
+      - -c
+      - max_parallel_workers=4
+      - -c
+      - max_parallel_workers_per_gather=2
+      - -c
+      - default_statistics_target=100
+      # Long ClickHouse-side work runs elsewhere; a stuck Postgres statement here
+      # is always a bug. Migrations override this themselves.
+      - -c
+      - idle_in_transaction_session_timeout=300000
+    environment:
+      POSTGRES_USER: posthog
+      POSTGRES_DB: posthog
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U posthog"]
+      interval: 5s
+      timeout: 30s
+      retries: 30
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: ${MEM_DB:-2560M}
+    logging: *default-logging
+
+  redis7:
+    image: redis:7.2-alpine
+    container_name: ${CONTAINER_PREFIX}-redis7
+    restart: unless-stopped
+    # allkeys-lru matches upstream: PostHog treats this Redis as a cache plus the
+    # Celery broker, and relies on eviction rather than OOM under pressure.
+    command: >-
+      redis-server
+      --maxmemory ${REDIS_MAXMEMORY:-512mb}
+      --maxmemory-policy allkeys-lru
+      --save 900 1
+      --tcp-keepalive 300
+    volumes:
+      - redis7-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 10s
+      retries: 10
+    deploy:
+      resources:
+        limits:
+          memory: ${MEM_REDIS:-768M}
+    logging: *default-logging
+
+  # Shadow store the CDP services dual-write to. Data is disposable; every CDP
+  # process refuses to start without a CDP_VALKEY_HOST.
+  valkey:
+    image: valkey/valkey:8.1-alpine
+    container_name: ${CONTAINER_PREFIX}-valkey
+    restart: unless-stopped
+    command: valkey-server --maxmemory ${VALKEY_MAXMEMORY:-256mb} --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 10s
+      retries: 10
+    deploy:
+      resources:
+        limits:
+          memory: ${MEM_VALKEY:-384M}
+    logging: *default-logging
+
+  # ClickHouse coordination for the ReplicatedMergeTree tables PostHog creates.
+  zookeeper:
+    image: zookeeper:3.7.0
+    container_name: ${CONTAINER_PREFIX}-zookeeper
+    restart: unless-stopped
+    environment:
+      # Default heap is sized off host RAM; pin it so ZK can't claim a GB it never uses.
+      JVMFLAGS: "-Xms128m -Xmx${ZK_HEAP:-256m}"
+      ZOO_AUTOPURGE_PURGEINTERVAL: 1
+      ZOO_AUTOPURGE_SNAPRETAINCOUNT: 3
+      ZOO_4LW_COMMANDS_WHITELIST: "srvr,ruok,stat"
+    volumes:
+      - zookeeper-data:/data
+      - zookeeper-datalog:/datalog
+      - zookeeper-logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "echo ruok | nc -w 2 127.0.0.1 2181 | grep -q imok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: ${MEM_ZOOKEEPER:-512M}
+    logging: *default-logging
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.6.2.158
+    container_name: ${CONTAINER_PREFIX}-clickhouse
+    restart: unless-stopped
+    depends_on:
+      assets:
+        condition: service_completed_successfully
+      zookeeper:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    environment:
+      CLICKHOUSE_SKIP_USER_SETUP: 1
+      KAFKA_HOSTS: "kafka:9092"
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    # The funnel UDF binaries and protobuf format schemas can't live in a compose
+    # `config:` (they're multi-MB executables), so they are copied in from the
+    # app image on every start — which also keeps them in step across upgrades.
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -euo pipefail
+        mkdir -p /var/lib/clickhouse/user_scripts /var/lib/clickhouse/format_schemas
+        cp -a /posthog-assets/user_scripts/. /var/lib/clickhouse/user_scripts/
+        cp -a /posthog-assets/idl/. /var/lib/clickhouse/format_schemas/
+        cp -a /posthog-assets/latest_user_defined_function.xml /etc/clickhouse-server/
+        chown -R clickhouse:clickhouse /var/lib/clickhouse/user_scripts /var/lib/clickhouse/format_schemas
+        # Upstream's docker-entrypoint-initdb.d/init-db.sh runs SYSTEM FLUSH LOGS on first
+        # init so that system.crash_log (and query_log) exist before PostHog's ClickHouse
+        # migrations create the custom-metrics views over them. Without it, migration
+        # 0159_crash_log_metrics fails with "Unknown table expression identifier
+        # 'system.crash_log'" and web restart-loops through the whole migrate step.
+        ( until clickhouse-client -q "SELECT 1" >/dev/null 2>&1; do sleep 2; done
+          clickhouse-client -q "SYSTEM FLUSH LOGS" && echo "system log tables flushed" ) &
+        exec /entrypoint.sh
+    configs:
+      - source: clickhouse_config
+        target: /etc/clickhouse-server/config.xml
+      - source: clickhouse_users
+        target: /etc/clickhouse-server/users.xml
+      - source: clickhouse_cluster
+        target: /etc/clickhouse-server/config.d/default.xml
+      - source: clickhouse_udf
+        target: /etc/clickhouse-server/user_defined_function.xml
+      - source: clickhouse_tuning
+        target: /etc/clickhouse-server/config.d/zz-cx43.xml
+      - source: clickhouse_profile
+        target: /etc/clickhouse-server/users.d/zz-cx43.xml
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - clickhouse-logs:/var/log/clickhouse-server
+      - posthog-assets:/posthog-assets:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8123/ping || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: ${MEM_CLICKHOUSE:-3584M}
+    logging: *default-logging
+
+  # Redpanda speaks the Kafka protocol without a JVM or its own ZooKeeper.
+  kafka:
+    image: docker.io/redpandadata/redpanda:v25.1.9
+    container_name: ${CONTAINER_PREFIX}-kafka
+    restart: unless-stopped
+    command:
+      - redpanda
+      - start
+      - --kafka-addr internal://0.0.0.0:9092
+      - --advertise-kafka-addr internal://kafka:9092
+      - --pandaproxy-addr internal://0.0.0.0:8082
+      - --advertise-pandaproxy-addr internal://kafka:8082
+      - --schema-registry-addr internal://0.0.0.0:8081
+      - --rpc-addr kafka:33145
+      - --advertise-rpc-addr kafka:33145
+      - --mode dev-container
+      # Seastar preallocates --memory up front, so this is a floor as well as a cap.
+      - --smp ${RP_SMP:-2}
+      - --memory ${RP_MEMORY:-2G}
+      - --reserve-memory 0M
+      # We share the box with ~30 other containers, so yield instead of busy-polling.
+      - --overprovisioned
+      - --set redpanda.empty_seed_starts_cluster=false
+      - --seeds kafka:33145
+      - --set redpanda.auto_create_topics_enabled=true
+    environment:
+      ALLOW_PLAINTEXT_LISTENER: "true"
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:9644/v1/status/ready || exit 1"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: ${MEM_KAFKA:-2560M}
+    logging: *default-logging
+
+  # Creates the topics the ingestion consumers assert at startup, and caps how much
+  # disk a stalled consumer can cost us (the box only has 160 GB).
+  kafka-init:
+    image: docker.io/redpandadata/redpanda:v25.1.9
+    container_name: ${CONTAINER_PREFIX}-kafka-init
+    restart: "no"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        set -x
+        echo "Waiting for Kafka broker to accept connections..."
+        TIMEOUT=60; ELAPSED=0
+        until rpk topic list --brokers kafka:9092 2>/dev/null; do
+            sleep 2; ELAPSED=$$((ELAPSED + 2))
+            if [ $$ELAPSED -ge $$TIMEOUT ]; then
+                echo "Timeout waiting for Kafka broker after $${TIMEOUT}s"; exit 1
+            fi
+        done
+        # Cluster-wide retention defaults, so auto-created topics are bounded too.
+        # `rpk cluster config` talks to the admin API (9644), not the Kafka port.
+        rpk cluster config set log_retention_ms ${KAFKA_RETENTION_MS:-86400000} -X admin.hosts=kafka:9644 --no-confirm \
+            || echo "WARN: could not set log_retention_ms - auto-created topics keep Redpanda's 7-day default"
+        rpk cluster config set retention_bytes ${KAFKA_RETENTION_BYTES:-1073741824} -X admin.hosts=kafka:9644 --no-confirm \
+            || echo "WARN: could not set retention_bytes - auto-created topics keep Redpanda's unlimited default"
+        TOPICS="clickhouse_events_json \
+            clickhouse_ai_events_json \
+            clickhouse_heatmap_events \
+            clickhouse_flag_evaluations \
+            clickhouse_ingestion_warnings \
+            events_plugin_ingestion_ai \
+            events_plugin_ingestion_dlq \
+            events_plugin_ingestion_overflow \
+            events_plugin_ingestion_async \
+            ingestion-clientwarnings-main-1 \
+            heatmaps_ingestion \
+            clickhouse_groups \
+            clickhouse_person \
+            clickhouse_person_distinct_id \
+            clickhouse_app_metrics2 \
+            log_entries \
+            clickhouse_tophog"
+        for topic in $$TOPICS; do
+            if rpk topic create "$$topic" --brokers kafka:9092 -p 1 -r 1 \
+                    -c retention.ms=${KAFKA_RETENTION_MS:-86400000} \
+                    -c retention.bytes=${KAFKA_RETENTION_BYTES:-1073741824} 2>&1; then
+                echo "Topic $$topic created"
+            elif rpk topic list --brokers kafka:9092 | grep -q "$$topic"; then
+                echo "Topic $$topic already exists, continuing"
+            else
+                echo "Failed to create topic $$topic"; exit 1
+            fi
+        done
+        rpk topic list --brokers kafka:9092
+        echo "Topics ready"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    logging: *default-logging
+
+  # S3-compatible store for exports, AI blobs and the DuckLake staging bucket.
+  objectstorage:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    container_name: ${CONTAINER_PREFIX}-objectstorage
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: "${MINIO_ROOT_USER}"
+      MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD}"
+    entrypoint: sh
+    command: -c 'mkdir -p /data/posthog /data/ducklake-dev /data/ai-blobs && minio server --address ":19000" --console-address ":19001" /data'
+    volumes:
+      - objectstorage-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:19000/minio/health/live || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: ${MEM_OBJECTSTORAGE:-512M}
+    logging: *default-logging
+
+  # Blob store for session replay v2 snapshots — the fastest-growing data on disk.
+  seaweedfs:
+    image: chrislusf/seaweedfs:4.29
+    container_name: ${CONTAINER_PREFIX}-seaweedfs
+    restart: unless-stopped
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        /usr/bin/weed "$$@" &
+        WEED_PID=$$!
+        echo "Waiting for SeaweedFS to initialize..."
+        while true; do
+            sleep 5
+            if echo "s3.bucket.list" | /usr/bin/weed shell -master=localhost:9333 2>&1 | grep -q "posthog"; then
+                echo "Bucket posthog exists!"; break
+            fi
+            echo "s3.bucket.create -name posthog" | /usr/bin/weed shell -master=localhost:9333 2>&1 || true
+        done
+        echo "SeaweedFS ready with posthog bucket"
+        wait $$WEED_PID
+      - --
+    command: ["server", "-s3", "-s3.port=8333", "-dir=/data", "-volume.max=1000", "-master.volumePreallocate=false"]
+    volumes:
+      - seaweedfs-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "echo 's3.bucket.list' | /usr/bin/weed shell -master=localhost:9333 2>&1 | grep -q posthog"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: ${MEM_SEAWEEDFS:-768M}
+    logging: *default-logging
+
+  # Durable workflow engine behind batch exports and scheduled alerts.
+  # ENABLE_ES=false keeps visibility in Postgres, so no Elasticsearch container.
+  temporal:
+    image: temporalio/auto-setup:1.26.2
+    container_name: ${CONTAINER_PREFIX}-temporal
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB: postgres12
+      DB_PORT: "5432"
+      POSTGRES_USER: posthog
+      POSTGRES_PWD: "${POSTGRES_PASSWORD}"
+      POSTGRES_SEEDS: db
+      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/development-sql.yaml
+      ENABLE_ES: "false"
+    configs:
+      - source: temporal_dynamicconfig
+        target: /etc/temporal/config/dynamicconfig/development-sql.yaml
+    healthcheck:
+      # Temporal binds its container IP, not loopback — 127.0.0.1 never answers.
+      test: ["CMD-SHELL", "nc -z $$(hostname) 7233"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 120s
+    deploy:
+      resources:
+        limits:
+          memory: ${MEM_TEMPORAL:-768M}
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------
+  # PostHog application (Django)
+  # ---------------------------------------------------------------------------
+  web:
+    image: posthog/posthog:${POSTHOG_APP_TAG}
+    container_name: ${CONTAINER_PREFIX}-web
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis7:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      objectstorage:
+        condition: service_healthy
+      seaweedfs:
+        condition: service_healthy
+      personhog-router:
+        condition: service_started
+    # Upstream's compose/start script, inlined: wait for the stores, migrate, serve.
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        until (echo > /dev/tcp/clickhouse/9000) 2>/dev/null; do echo "waiting for clickhouse"; sleep 5; done
+        until (echo > /dev/tcp/db/5432) 2>/dev/null; do echo "waiting for postgres"; sleep 5; done
+        ./bin/migrate
+        exec ./bin/docker-server
+    expose:
+      - "8000"
+    environment:
+      <<: *posthog-app-env
+      LIVESTREAM_HOST: "https://${POSTHOG_DOMAIN}/livestream"
+      OTEL_SERVICE_NAME: posthog
+      SESSION_RECORDING_V2_S3_ENABLED: "${SESSION_RECORDING_V2_S3_ENABLED:-True}"
+      # Each Unit process is a full Django interpreter (~1 GB resident on 2026
+      # master). 3 is the sweet spot on 16 GB; raise it only if the UI feels
+      # serialised under load, and raise MEM_WEB with it.
+      NGINX_UNIT_APP_PROCESSES: "${WEB_PROCESSES:-3}"
+      NGINX_UNIT_REQUEST_LIMIT: "${WEB_REQUEST_LIMIT:-7500}"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "python3 -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/_health', timeout=5).status==200 else 1)\""
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      # First boot runs the full Postgres + ClickHouse migration set. Measured on a
+      # CX43 in Sep 2026: ~50 minutes, almost all of it Django's single-threaded
+      # planning of ~2,700 migrations on a shared 2 GHz core. Give it an hour.
+      start_period: 3600s
+    deploy:
+      resources:
+        limits:
+          memory: ${MEM_WEB:-3072M}
+    logging: *default-logging
+
+  worker:
+    image: posthog/posthog:${POSTHOG_APP_TAG}
+    container_name: ${CONTAINER_PREFIX}-worker
+    restart: unless-stopped
+    command: ["./bin/docker-worker-celery", "--with-scheduler"]
+    depends_on:
+      web:
+        condition: service_started
+      db:
+        condition: service_healthy
+      redis7:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      personhog-router:
+        condition: service_started
+      browserless:
+        condition: service_started
+    environment:
+      <<: *posthog-app-env
+      POSTHOG_SKIP_MIGRATION_CHECKS: "1"
+      SESSION_RECORDING_V2_S3_ENABLED: "${SESSION_RECORDING_V2_S3_ENABLED:-True}"
+      # Celery forks one full Django process per worker and defaults to one per
+      # vCPU — 8 of them would not fit. Recycle children to cap leak growth.
+      WEB_CONCURRENCY: "${CELERY_CONCURRENCY:-2}"
+      CELERY_MAX_TASKS_PER_CHILD: "${CELERY_MAX_TASKS_PER_CHILD:-200}"
+      CELERY_MAX_MEMORY_PER_CHILD: "${CELERY_MAX_MEMORY_PER_CHILD:-400000}"
+      CELERY_WORKER_PREFETCH_MULTIPLIER: "${CELERY_PREFETCH:-1}"
+    deploy:
+      resources:
+        limits:
+          memory: ${MEM_WORKER:-2560M}
+    logging: *default-logging
+
+  temporal-django-worker:
+    image: posthog/posthog:${POSTHOG_APP_TAG}
+    container_name: ${CONTAINER_PREFIX}-temporal-django-worker
+    restart: unless-stopped
+    command: ["./bin/temporal-django-worker"]
+    depends_on:
+      web:
+        condition: service_started
+      temporal:
+        condition: service_healthy
+    environment:
+      <<: *posthog-app-env
+      TEMPORAL_HOST: temporal
+      POSTHOG_SKIP_MIGRATION_CHECKS: "1"
+      SESSION_RECORDING_V2_S3_ENABLED: "${SESSION_RECORDING_V2_S3_ENABLED:-True}"
+    deploy:
+      resources:
+        limits:
+          memory: ${MEM_TEMPORAL_WORKER:-1536M}
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------
+  # Plugin server (Node) — one container per consumer role
+  # ---------------------------------------------------------------------------
+  # CDP: destinations, hog functions, public webhooks.
+  plugins:
+    image: posthog/posthog-node:${POSTHOG_NODE_TAG}
+    container_name: ${CONTAINER_PREFIX}-plugins
+    restart: unless-stopped
+    command: ["node", "nodejs/dist/index.js"]
+    depends_on:
+      assets:
+        condition: service_completed_successfully
+      db:
+        condition: service_healthy
+      redis7:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      objectstorage:
+        condition: service_healthy
+      seaweedfs:
+        condition: service_healthy
+    environment:
+      <<: *plugin-server-env
+      NODE_OPTIONS: "--max-old-space-size=${NODE_HEAP_PLUGINS:-448}"
+      SITE_URL: "https://${POSTHOG_DOMAIN}"
+      SECRET_KEY: "${POSTHOG_SECRET}"
+      OBJECT_STORAGE_ENABLED: "true"
+      OBJECT_STORAGE_ENDPOINT: "http://objectstorage:19000"
+      OBJECT_STORAGE_PUBLIC_ENDPOINT: "https://${POSTHOG_DOMAIN}"
+      OBJECT_STORAGE_ACCESS_KEY_ID: "${MINIO_ROOT_USER}"
+      OBJECT_STORAGE_SECRET_ACCESS_KEY: "${MINIO_ROOT_PASSWORD}"
+      CDP_REDIS_HOST: redis7
+      CDP_REDIS_PORT: "6379"
+      LOGS_REDIS_HOST: redis7
+      LOGS_REDIS_PORT: "6379"
+      LOGS_REDIS_TLS: "false"
+      TRACES_REDIS_HOST: redis7
+      TRACES_REDIS_PORT: "6379"
+      TRACES_REDIS_TLS: "false"
+      # Every CDP process dual-writes to Valkey and refuses to start without a host.
+      CDP_VALKEY_HOST: valkey
+      CDP_VALKEY_PORT: "6379"
+    volumes:
+      - posthog-share:/share:ro
+    deploy:
+      resources:
+        limits:
+          memory: ${MEM_PLUGINS:-768M}
+    logging: *default-logging
+
+  # The main analytics ingestion pipeline: events -> persons -> ClickHouse.
+  ingestion-general:
+    image: posthog/posthog-node:${POSTHOG_NODE_TAG}
+    container_name: ${CONTAINER_PREFIX}-ingestion-general
+    restart: unless-stopped
+    command: ["node", "nodejs/dist/index.js"]
+    depends_on:
+      db:
+        condition: service_healthy
+      redis7:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      objectstorage:
+        condition: service_healthy
+      personhog-router:
+        condition: service_started
+    environment:
+      <<: *plugin-server-env
+      NODE_OPTIONS: "--max-old-space-size=${NODE_HEAP_INGESTION:-640}"
+      PLUGIN_SERVER_MODE: ingestion-v2-combined
+      COOKIELESS_REDIS_HOST: redis7
+      COOKIELESS_REDIS_PORT: "6379"
+      CDP_REDIS_HOST: redis7
+      PERSONHOG_ADDR: "personhog-router:50052"
+      PERSONHOG_ENABLED: "true"
+      # Combined mode owns AI blob offload; without a bucket, multimodal payloads
+      # get inlined into the event instead of stored as phaiblob:// pointers.
+      AI_BLOB_S3_BUCKET: ai-blobs
+      AI_BLOB_S3_PREFIX: "aio/"
+      AI_BLOB_S3_ENDPOINT: "http://objectstorage:19000"
+      AI_BLOB_S3_REGION: us-east-1
+      AI_BLOB_S3_ACCESS_KEY_ID: "${MINIO_ROOT_USER}"
+      AI_BLOB_S3_SECRET_ACCESS_KEY: "${MINIO_ROOT_PASSWORD}"
+      AI_BLOB_OFFLOAD_TEAMS: "*"
+    deploy:
+      resources:
+        limits:
+          memory: ${MEM_INGESTION:-1024M}
+    logging: *default-logging
+
+  ingestion-sessionreplay:
+    image: posthog/posthog-node:${POSTHOG_NODE_TAG}
+    container_name: ${CONTAINER_PREFIX}-ingestion-sessionreplay
+    restart: unless-stopped
+    command: ["node", "nodejs/dist/index.js"]
+    depends_on:
+      db:
+        condition: service_healthy
+      redis7:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      seaweedfs:
+        condition: service_healthy
+    environment:
+      <<: *plugin-server-env
+      NODE_OPTIONS: "--max-old-space-size=${NODE_HEAP_REPLAY:-448}"
+      PLUGIN_SERVER_MODE: recordings-blob-ingestion-v2
+      SESSION_RECORDING_V2_S3_ENDPOINT: "http://seaweedfs:8333"
+      SESSION_RECORDING_V2_S3_ACCESS_KEY_ID: "any"
+      SESSION_RECORDING_V2_S3_SECRET_ACCESS_KEY: "any"
+      SESSION_RECORDING_V2_S3_TIMEOUT_MS: "120000"
+    deploy:
+      resources:
+        limits:
+          memory: ${MEM_INGESTION_REPLAY:-768M}
+    logging: *default-logging
+
+  recording-api:
+    image: posthog/posthog-node:${POSTHOG_NODE_TAG}
+    container_name: ${CONTAINER_PREFIX}-recording-api
+    restart: unless-stopped
+    command: ["node", "nodejs/dist/index.js"]
+    depends_on:
+      db:
+        condition: service_healthy
+      redis7:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      seaweedfs:
+        condition: service_healthy
+    environment:
+      <<: *plugin-server-env
+      NODE_OPTIONS: "--max-old-space-size=${NODE_HEAP_SMALL:-320}"
+      PLUGIN_SERVER_MODE: recording-api
+      SESSION_RECORDING_API_REDIS_HOST: redis7
+      SESSION_RECORDING_API_REDIS_PORT: "6379"
+      # Read side of the replay v2 blob store. Must match what ingestion-sessionreplay
+      # writes to; without these it falls back to localhost:8333 and every playback 500s.
+      SESSION_RECORDING_V2_S3_ENDPOINT: "http://seaweedfs:8333"
+      SESSION_RECORDING_V2_S3_ACCESS_KEY_ID: "any"
+      SESSION_RECORDING_V2_S3_SECRET_ACCESS_KEY: "any"
+      # web and worker send this as X-Internal-Api-Secret.
+      INTERNAL_API_SECRET: "${POSTHOG_SECRET}"
+    deploy:
+      resources:
+        limits:
+          memory: ${MEM_NODE_SMALL:-512M}
+    logging: *default-logging
+
+  ingestion-error-tracking:
+    image: posthog/posthog-node:${POSTHOG_NODE_TAG}
+    container_name: ${CONTAINER_PREFIX}-ingestion-error-tracking
+    restart: unless-stopped
+    command: ["node", "nodejs/dist/index.js"]
+    depends_on:
+      db:
+        condition: service_healthy
+      redis7:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    environment:
+      <<: *plugin-server-env
+      NODE_OPTIONS: "--max-old-space-size=${NODE_HEAP_SMALL:-320}"
+      PLUGIN_SERVER_MODE: ingestion-errortracking
+      CDP_REDIS_HOST: redis7
+      ERROR_TRACKING_CYMBAL_BASE_URL: "http://cymbal:3302"
+    deploy:
+      resources:
+        limits:
+          memory: ${MEM_NODE_SMALL:-512M}
+    logging: *default-logging
+
+  ingestion-logs:
+    image: posthog/posthog-node:${POSTHOG_NODE_TAG}
+    container_name: ${CONTAINER_PREFIX}-ingestion-logs
+    restart: unless-stopped
+    command: ["node", "nodejs/dist/index.js"]
+    depends_on:
+      db:
+        condition: service_healthy
+      redis7:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    environment:
+      <<: *plugin-server-env
+      NODE_OPTIONS: "--max-old-space-size=${NODE_HEAP_SMALL:-320}"
+      PLUGIN_SERVER_MODE: ingestion-logs
+      LOGS_REDIS_HOST: redis7
+      LOGS_REDIS_TLS: "false"
+      CDP_REDIS_HOST: redis7
+    deploy:
+      resources:
+        limits:
+          memory: ${MEM_NODE_SMALL:-512M}
+    logging: *default-logging
+
+  ingestion-traces:
+    image: posthog/posthog-node:${POSTHOG_NODE_TAG}
+    container_name: ${CONTAINER_PREFIX}-ingestion-traces
+    restart: unless-stopped
+    command: ["node", "nodejs/dist/index.js"]
+    depends_on:
+      db:
+        condition: service_healthy
+      redis7:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    environment:
+      <<: *plugin-server-env
+      NODE_OPTIONS: "--max-old-space-size=${NODE_HEAP_SMALL:-320}"
+      PLUGIN_SERVER_MODE: ingestion-traces
+      TRACES_REDIS_HOST: redis7
+      TRACES_REDIS_TLS: "false"
+    deploy:
+      resources:
+        limits:
+          memory: ${MEM_NODE_SMALL:-512M}
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------
+  # Rust / Go edge services
+  # ---------------------------------------------------------------------------
+  capture:
+    image: ghcr.io/posthog/posthog/capture:${CAPTURE_TAG:-${POSTHOG_GHCR_TAG}}
+    container_name: ${CONTAINER_PREFIX}-capture
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+      redis7:
+        condition: service_healthy
+    environment:
+      ADDRESS: "0.0.0.0:3000"
+      CAPTURE_MODE: events
+      KAFKA_TOPIC: events_plugin_ingestion
+      KAFKA_ERROR_TRACKING_TOPIC: ingestion-errortracking-main
+      KAFKA_HOSTS: "kafka:9092"
+      REDIS_URL: "redis://redis7:6379/"
+      RUST_LOG: "info,rdkafka=warn"
+      CAPTURE_V1_SINKS: msk
+      CAPTURE_V1_SINK_MSK_KAFKA_HOSTS: "kafka:9092"
+      CAPTURE_V1_SINK_MSK_KAFKA_TOPIC_MAIN: events_plugin_ingestion
+      CAPTURE_V1_SINK_MSK_KAFKA_TOPIC_HISTORICAL: events_plugin_ingestion_historical
+      CAPTURE_V1_SINK_MSK_KAFKA_TOPIC_OVERFLOW: events_plugin_ingestion_overflow
+      CAPTURE_V1_SINK_MSK_KAFKA_TOPIC_DLQ: events_plugin_ingestion_dlq
+      CAPTURE_V1_SINK_MSK_KAFKA_TOPIC_EXCEPTION: ingestion-errortracking-main
+      CAPTURE_V1_SINK_MSK_KAFKA_TOPIC_HEATMAP: heatmaps_ingestion
+      CAPTURE_V1_SINK_MSK_KAFKA_TOPIC_CLIENT_INGESTION_WARNING: ingestion-clientwarnings-main-1
+    deploy:
+      resources:
+        limits:
+          memory: ${MEM_CAPTURE:-320M}
+    logging: *default-logging
+
+  # Upstream hobby routes /i/v0/ai to a capture-ai service it never defines, so
+  # LLM-analytics ingestion 502s there. Same image, ~60 MB, wired up here.
+  capture-ai:
+    image: ghcr.io/posthog/posthog/capture:${CAPTURE_TAG:-${POSTHOG_GHCR_TAG}}
+    container_name: ${CONTAINER_PREFIX}-capture-ai
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+      redis7:
+        condition: service_healthy
+    environment:
+      ADDRESS: "0.0.0.0:3000"
+      CAPTURE_MODE: ai
+      KAFKA_TOPIC: events_plugin_ingestion_ai
+      KAFKA_HOSTS: "kafka:9092"
+      REDIS_URL: "redis://redis7:6379/"
+      RUST_LOG: "info,rdkafka=warn"
+    deploy:
+      resources:
+        limits:
+          memory: ${MEM_CAPTURE:-320M}
+    logging: *default-logging
+
+  replay-capture:
+    image: ghcr.io/posthog/posthog/capture:${CAPTURE_TAG:-${POSTHOG_GHCR_TAG}}
+    container_name: ${CONTAINER_PREFIX}-replay-capture
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+      redis7:
+        condition: service_healthy
+    environment:
+      ADDRESS: "0.0.0.0:3000"
+      CAPTURE_MODE: recordings
+      KAFKA_TOPIC: session_recording_snapshot_item_events
+      KAFKA_HOSTS: "kafka:9092"
+      REDIS_URL: "redis://redis7:6379/"
+      RUST_LOG: "info,rdkafka=warn"
+    deploy:
+      resources:
+        limits:
+          memory: ${MEM_CAPTURE:-320M}
+    logging: *default-logging
+
+  capture-logs:
+    image: ghcr.io/posthog/posthog/capture-logs:${CAPTURE_LOGS_TAG:-${POSTHOG_GHCR_TAG}}
+    container_name: ${CONTAINER_PREFIX}-capture-logs
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      BIND_HOST: "0.0.0.0"
+      BIND_PORT: "4318"
+      RUST_LOG: "info,rdkafka=warn"
+      KAFKA_HOSTS: "kafka:9092"
+      KAFKA_TOPIC: logs_ingestion
+      KAFKA_METRICS_TOPIC: metrics_ingestion
+      JWT_SECRET: "${POSTHOG_SECRET}"
+    deploy:
+      resources:
+        limits:
+          memory: ${MEM_CAPTURE:-320M}
+    logging: *default-logging
+
+  property-defs-rs:
+    image: ghcr.io/posthog/posthog/property-defs-rs:${PROPERTY_DEFS_TAG:-${POSTHOG_GHCR_TAG}}
+    container_name: ${CONTAINER_PREFIX}-property-defs-rs
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: "postgres://posthog:${POSTGRES_PASSWORD}@db:5432/posthog"
+      KAFKA_HOSTS: "kafka:9092"
+      SKIP_WRITES: "false"
+      SKIP_READS: "false"
+      FILTER_MODE: opt-out
+      RUST_LOG: info
+    deploy:
+      resources:
+        limits:
+          memory: ${MEM_RUST:-384M}
+    logging: *default-logging
+
+  feature-flags:
+    image: ghcr.io/posthog/posthog/feature-flags:${FEATURE_FLAGS_TAG:-${POSTHOG_GHCR_TAG}}
+    container_name: ${CONTAINER_PREFIX}-feature-flags
+    restart: unless-stopped
+    depends_on:
+      assets:
+        condition: service_completed_successfully
+      db:
+        condition: service_healthy
+      redis7:
+        condition: service_healthy
+    environment:
+      ADDRESS: "0.0.0.0:3001"
+      WRITE_DATABASE_URL: "postgres://posthog:${POSTGRES_PASSWORD}@db:5432/posthog"
+      READ_DATABASE_URL: "postgres://posthog:${POSTGRES_PASSWORD}@db:5432/posthog"
+      PERSONS_WRITE_DATABASE_URL: "postgres://posthog:${POSTGRES_PASSWORD}@db:5432/posthog"
+      PERSONS_READ_DATABASE_URL: "postgres://posthog:${POSTGRES_PASSWORD}@db:5432/posthog"
+      MAXMIND_DB_PATH: "/share/GeoLite2-City.mmdb"
+      REDIS_URL: "redis://redis7:6379/"
+      COOKIELESS_REDIS_HOST: redis7
+      COOKIELESS_REDIS_PORT: "6379"
+      RUST_LOG: info
+    volumes:
+      - posthog-share:/share:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/_readiness"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: ${MEM_RUST:-384M}
+    logging: *default-logging
+
+  # Serves /surveys and /array/* (remote config) straight from Redis.
+  hypercache-server:
+    image: ghcr.io/posthog/posthog/hypercache-server:${HYPERCACHE_TAG:-${POSTHOG_GHCR_TAG}}
+    container_name: ${CONTAINER_PREFIX}-hypercache-server
+    restart: unless-stopped
+    depends_on:
+      redis7:
+        condition: service_healthy
+    environment:
+      ADDRESS: "0.0.0.0:3002"
+      REDIS_URL: "redis://redis7:6379/"
+      RUST_LOG: info
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3002/_readiness"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: ${MEM_RUST_SMALL:-256M}
+    logging: *default-logging
+
+  personhog-replica:
+    image: ghcr.io/posthog/posthog/personhog-replica:${PERSONHOG_TAG:-${POSTHOG_GHCR_TAG}}
+    container_name: ${CONTAINER_PREFIX}-personhog-replica
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      GRPC_ADDRESS: "0.0.0.0:50051"
+      PRIMARY_DATABASE_URL: "postgres://posthog:${POSTGRES_PASSWORD}@db:5432/posthog"
+      METRICS_PORT: "9100"
+      RUST_LOG: info
+    deploy:
+      resources:
+        limits:
+          memory: ${MEM_RUST:-384M}
+    logging: *default-logging
+
+  personhog-router:
+    image: ghcr.io/posthog/posthog/personhog-router:${PERSONHOG_TAG:-${POSTHOG_GHCR_TAG}}
+    container_name: ${CONTAINER_PREFIX}-personhog-router
+    restart: unless-stopped
+    depends_on:
+      - personhog-replica
+    environment:
+      GRPC_ADDRESS: "0.0.0.0:50052"
+      REPLICA_URL: "http://personhog-replica:50051"
+      BACKEND_TIMEOUT_MS: "5000"
+      METRICS_PORT: "9101"
+      RUST_LOG: info
+    deploy:
+      resources:
+        limits:
+          memory: ${MEM_RUST_SMALL:-256M}
+    logging: *default-logging
+
+  # Error-tracking stack trace processing; delegates symbol resolution over gRPC.
+  cymbal:
+    image: ghcr.io/posthog/posthog/cymbal:${CYMBAL_TAG:-${POSTHOG_GHCR_TAG}}
+    container_name: ${CONTAINER_PREFIX}-cymbal
+    restart: unless-stopped
+    depends_on:
+      assets:
+        condition: service_completed_successfully
+      kafka-init:
+        condition: service_completed_successfully
+      seaweedfs:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+      redis7:
+        condition: service_healthy
+      cymbal-resolution:
+        condition: service_started
+    environment:
+      BIND_HOST: "0.0.0.0"
+      BIND_PORT: "3302"
+      KAFKA_HOSTS: "kafka:9092"
+      OBJECT_STORAGE_BUCKET: posthog
+      OBJECT_STORAGE_ACCESS_KEY_ID: "any"
+      OBJECT_STORAGE_SECRET_ACCESS_KEY: "any"
+      OBJECT_STORAGE_ENDPOINT: "http://seaweedfs:8333"
+      OBJECT_STORAGE_FORCE_PATH_STYLE: "true"
+      DATABASE_URL: "postgres://posthog:${POSTGRES_PASSWORD}@db:5432/posthog"
+      PERSONS_URL: "postgres://posthog:${POSTGRES_PASSWORD}@db:5432/posthog"
+      MAXMIND_DB_PATH: "/share/GeoLite2-City.mmdb"
+      REDIS_URL: "redis://redis7:6379/"
+      ISSUE_BUCKETS_REDIS_URL: "redis://redis7:6379/"
+      CYMBAL_REMOTE_RESOLUTION_HOST: cymbal-resolution
+      INTERNAL_API_SECRET: "${POSTHOG_SECRET}"
+      RUST_LOG: info
+    volumes:
+      - posthog-share:/share:ro
+    deploy:
+      resources:
+        limits:
+          memory: ${MEM_CYMBAL:-512M}
+    logging: *default-logging
+
+  cymbal-resolution:
+    image: ghcr.io/posthog/posthog/cymbal:${CYMBAL_TAG:-${POSTHOG_GHCR_TAG}}
+    container_name: ${CONTAINER_PREFIX}-cymbal-resolution
+    restart: unless-stopped
+    depends_on:
+      seaweedfs:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+    environment:
+      CYMBAL_MODE: resolution
+      GRPC_ADDRESS: "0.0.0.0:50061"
+      OBJECT_STORAGE_BUCKET: posthog
+      OBJECT_STORAGE_ACCESS_KEY_ID: "any"
+      OBJECT_STORAGE_SECRET_ACCESS_KEY: "any"
+      OBJECT_STORAGE_ENDPOINT: "http://seaweedfs:8333"
+      OBJECT_STORAGE_FORCE_PATH_STYLE: "true"
+      DATABASE_URL: "postgres://posthog:${POSTGRES_PASSWORD}@db:5432/posthog"
+      INTERNAL_API_SECRET: "${POSTHOG_SECRET}"
+      RUST_LOG: info
+    deploy:
+      resources:
+        limits:
+          memory: ${MEM_CYMBAL:-512M}
+    logging: *default-logging
+
+  # Powers the live events feed in the UI.
+  livestream:
+    image: ghcr.io/posthog/posthog/livestream:${LIVESTREAM_TAG:-${POSTHOG_GHCR_TAG}}
+    container_name: ${CONTAINER_PREFIX}-livestream
+    restart: unless-stopped
+    depends_on:
+      assets:
+        condition: service_completed_successfully
+      kafka:
+        condition: service_healthy
+    environment:
+      LIVESTREAM_JWT_SECRET: "${POSTHOG_SECRET}"
+    configs:
+      - source: livestream_config
+        target: /configs/configs.yml
+    volumes:
+      - posthog-share:/share:ro
+    deploy:
+      resources:
+        limits:
+          memory: ${MEM_LIVESTREAM:-384M}
+    logging: *default-logging
+
+  # Headless Chromium for image exports and heatmap screenshots — no browser
+  # ships in the PostHog image. Safe to comment out if you never export images.
+  browserless:
+    image: ghcr.io/browserless/chromium:v2.51.2
+    container_name: ${CONTAINER_PREFIX}-browserless
+    restart: unless-stopped
+    environment:
+      TOKEN: "${BROWSERLESS_SECRET}"
+      CONCURRENT: "${BROWSERLESS_CONCURRENT:-2}"
+      TIMEOUT: "${BROWSERLESS_TIMEOUT:-60000}"
+    deploy:
+      resources:
+        limits:
+          memory: ${MEM_BROWSERLESS:-1024M}
+    logging: *default-logging
+
+volumes:
+  postgres-data:
+  redis7-data:
+  clickhouse-data:
+  clickhouse-logs:
+  zookeeper-data:
+  zookeeper-datalog:
+  zookeeper-logs:
+  redpanda-data:
+  objectstorage-data:
+  seaweedfs-data:
+  posthog-assets:
+  posthog-share:
+  caddy-data:
+  caddy-config:
+
+networks:
+  dokploy-network:
+    external: true
