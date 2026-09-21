@@ -11,6 +11,7 @@ Standalone Docker Compose templates for deploying Supabase on [Dokploy](https://
 | `optimized-supabase-docker-compose.yml` | Production-optimized for Hetzner CCX33 (8 vCPU, 32GB RAM, NVMe SSD). Adds PostgreSQL tuning, `shm_size`, Docker log rotation, explicit service pool sizes. |
 | `optimized-supabase.env` | Environment variables for the optimized deployment. Includes PG tuning params, Supavisor pool sizing for 2000 connections, Realtime scaling, and service connection budgets. |
 | `kernel-tuning-notes.md` | Optional host-level kernel tuning (sysctl, hugepages, swap). Includes a full post-deployment verification checklist. |
+| `UPGRADE-GUIDE.md` | Step-by-step in-place upgrade of an existing deployment, including the JWT-secret-in-database fix, backups, verification and rollback. |
 
 **Which variant to use:**
 - **Standard** -- Development, staging, or small production on any server.
@@ -25,11 +26,12 @@ Standalone Docker Compose templates for deploying Supabase on [Dokploy](https://
    - `POSTGRES_PASSWORD` -- Strong random password
    - `JWT_SECRET` -- Strong random secret (min 32 chars)
    - `ANON_KEY` / `SERVICE_ROLE_KEY` -- Generate new JWTs signed with your `JWT_SECRET`
+   - `S3_PROTOCOL_ACCESS_KEY_ID` / `S3_PROTOCOL_ACCESS_KEY_SECRET` -- Random hex strings for the Storage S3 endpoint
    - `SUPABASE_HOST` -- Your domain (e.g., `supabase.example.com`)
-   - `API_EXTERNAL_URL` -- Full URL with scheme (e.g., `https://supabase.example.com`)
-   - `SUPABASE_PUBLIC_URL` -- Same as `API_EXTERNAL_URL`
+   - `SUPABASE_PUBLIC_URL` -- Full URL with scheme (e.g., `https://supabase.example.com`)
+   - `API_EXTERNAL_URL` -- `SUPABASE_PUBLIC_URL` plus the `/auth/v1` prefix (e.g., `https://supabase.example.com/auth/v1`)
    - `POOLER_TENANT_ID` -- Unique identifier for your tenant (e.g., `my-project-prod`)
-5. Deploy. All 12 containers should become healthy.
+5. Deploy. All 13 long-running containers should become healthy (the three `*-init` / `db-jwt-reset` jobs exit 0).
 
 ## Quick Start (Optimized for CCX33)
 
@@ -79,7 +81,7 @@ Update these environment variables in Dokploy, then redeploy:
 
 ```env
 SUPABASE_HOST=supabase.yourdomain.com
-API_EXTERNAL_URL=https://supabase.yourdomain.com
+API_EXTERNAL_URL=https://supabase.yourdomain.com/auth/v1
 SUPABASE_PUBLIC_URL=https://supabase.yourdomain.com
 ADDITIONAL_REDIRECT_URLS=https://supabase.yourdomain.com/*,https://yourapp.com/*
 ```
@@ -103,9 +105,9 @@ The `.env` files ship with placeholder secrets. **You must replace all of these 
 | `SECRET_KEY_BASE` | Generate a random 64-char hex string. Used by Supavisor for encryption. |
 | `VAULT_ENC_KEY` | Generate a random 32-char string. Used for Vault encryption. |
 | `PG_META_CRYPTO_KEY` | Generate a random 32-char string. Used by Studio and Meta for metadata encryption. |
-| `LOGFLARE_API_KEY` | Generate a random string. Used for log ingestion authentication. |
-| `LOGFLARE_PUBLIC_ACCESS_TOKEN` | Generate a random string (can be same as `LOGFLARE_API_KEY`). |
-| `LOGFLARE_PRIVATE_ACCESS_TOKEN` | Generate a random string (can be same as above for self-hosted). |
+| `S3_PROTOCOL_ACCESS_KEY_ID` / `S3_PROTOCOL_ACCESS_KEY_SECRET` | Generate random hex strings (`openssl rand -hex 16` / `-hex 32`). Credentials for the S3-compatible endpoint at `/storage/v1/s3`. |
+| `LOGFLARE_PUBLIC_ACCESS_TOKEN` | Generate a random string. Used by Vector to ship logs into Logflare. |
+| `LOGFLARE_PRIVATE_ACCESS_TOKEN` | Generate a random string. Used by Studio for the Logs UI. |
 | `POOLER_TENANT_ID` | Change from `your-tenant-id` to a unique identifier (e.g., `myproject-prod`). |
 | `REALTIME_DB_ENC_KEY` | Generate a random **16-char** hex string. Must be exactly 16 bytes (AES-128). Used by Realtime for encryption. |
 
@@ -129,6 +131,31 @@ openssl rand -base64 24
 openssl rand -hex 32
 ```
 
+### The JWT secret is never stored in the database
+
+Older versions of these templates (and of the upstream Supabase compose) wrote
+`JWT_SECRET` into Postgres twice: as the database setting
+`app.settings.jwt_secret` (via the `99-jwt.sql` init script) and again on every
+PostgREST request through `PGRST_APP_SETTINGS_JWT_SECRET`. Any database role,
+including `anon` from inside a SQL function called over the REST API, could read
+it with `select current_setting('app.settings.jwt_secret')` and mint its own
+`service_role` tokens. This is [supabase/supabase#43513](https://github.com/supabase/supabase/issues/43513),
+fixed upstream in [#45003](https://github.com/supabase/supabase/pull/45003).
+
+Both templates now:
+
+- only store the non-secret `app.settings.jwt_exp` at init time,
+- do not set `PGRST_APP_SETTINGS_JWT_SECRET` on PostgREST,
+- run a one-shot `db-jwt-reset` container on every deploy that executes
+  `ALTER DATABASE postgres RESET "app.settings.jwt_secret"` (a no-op once the
+  setting is gone), so existing databases are cleaned up by simply redeploying.
+
+If you have SQL functions that read `current_setting('app.settings.jwt_secret')`,
+move the secret into [Supabase Vault](https://supabase.com/docs/guides/database/vault)
+(`select vault.create_secret('<secret>', 'jwt_secret')` and read it back from
+`vault.decrypted_secrets` inside a `security definer` function that only
+privileged roles can execute).
+
 ## Configuration Reference
 
 ### Secrets (must change before production)
@@ -149,8 +176,8 @@ openssl rand -hex 32
 | Variable | Example | Description |
 |----------|---------|-------------|
 | `SUPABASE_HOST` | `supabase.example.com` | Hostname for Traefik routing |
-| `API_EXTERNAL_URL` | `https://supabase.example.com` | Public API URL |
-| `SUPABASE_PUBLIC_URL` | `https://supabase.example.com` | Studio public URL |
+| `API_EXTERNAL_URL` | `https://supabase.example.com/auth/v1` | Public URL of the Auth service, including `/auth/v1`. Used as the JWT `iss` claim and for OAuth callback URLs. |
+| `SUPABASE_PUBLIC_URL` | `https://supabase.example.com` | Public API / Studio URL |
 | `SITE_URL` | `https://myapp.com` | Your application URL (for auth redirects) |
 | `ADDITIONAL_REDIRECT_URLS` | `https://myapp.com/*` | Comma-separated allowed redirect URLs |
 
@@ -186,24 +213,31 @@ openssl rand -hex 32
 
 ## Architecture
 
-### Services (12 containers)
+### Services (13 long-running containers + 3 one-shot init jobs)
+
+Image versions track the upstream self-hosted release
+[v0.8.1 (2026-09-09)](https://github.com/supabase/supabase/blob/master/docker/CHANGELOG.md).
 
 | Service | Image | Role |
 |---------|-------|------|
-| **db** | `supabase/postgres:17.6.1.081` | PostgreSQL 17 database |
-| **kong** | `kong:2.8.1` | API gateway / reverse proxy |
-| **auth** | `supabase/gotrue:v2.185.0` | Authentication (GoTrue) |
-| **rest** | `postgrest/postgrest:v14.3` | RESTful API (PostgREST) |
-| **realtime** | `supabase/realtime:v2.72.0` | WebSocket subscriptions |
-| **storage** | `supabase/storage-api:v1.37.7` | File storage API |
-| **imgproxy** | `darthsim/imgproxy:v3.30.1` | Image transformation |
-| **meta** | `supabase/postgres-meta:v0.95.2` | Database metadata API |
-| **studio** | `supabase/studio:2026.02.09-sha-18cc6f8` | Dashboard UI |
-| **analytics** | `supabase/logflare:1.30.3` | Log analytics |
-| **vector** | `timberio/vector:0.28.1-alpine` | Log collection |
-| **supavisor** | `supabase/supavisor:2.7.4` | Connection pooler |
+| **db** | `supabase/postgres:17.6.1.136` | PostgreSQL 17 database |
+| **kong** | `kong/kong:3.9.3` | API gateway / reverse proxy |
+| **auth** | `supabase/gotrue:v2.196.0` | Authentication (GoTrue) |
+| **rest** | `postgrest/postgrest:v14.17` | RESTful API (PostgREST) |
+| **realtime** | `supabase/realtime:v2.134.10` | WebSocket subscriptions |
+| **storage** | `supabase/storage-api:v1.74.0` | File storage API |
+| **imgproxy** | `darthsim/imgproxy:v3.31.4` | Image transformation |
+| **meta** | `supabase/postgres-meta:v0.99.0` | Database metadata API |
+| **studio** | `supabase/studio:2026.09.07-sha-7996410` | Dashboard UI |
+| **analytics** | `supabase/logflare:1.50.10` | Log analytics |
+| **vector** | `timberio/vector:0.53.0-alpine` | Log collection |
+| **functions** | `supabase/edge-runtime:v1.76.2` | Deno Edge Functions |
+| **supavisor** | `supabase/supavisor:2.9.12` | Connection pooler |
 
-**Note:** Edge Functions (`supabase/edge-runtime`) is not included in these templates. If you need Deno Edge Functions, add the `functions` service back from the [official Supabase docker-compose](https://github.com/supabase/supabase/blob/master/docker/docker-compose.yml).
+One-shot jobs that run on every deploy and exit: **db-init** (copies Postgres
+config + generates the self-signed TLS cert on first run), **db-jwt-reset**
+(removes `app.settings.jwt_secret` from existing databases) and
+**functions-init** (seeds the edge functions folder on first run).
 
 ### Connection Flow
 
@@ -255,7 +289,7 @@ These are optional. The compose files work without them.
 
 After deploying, verify your setup works correctly. See [`kernel-tuning-notes.md`](kernel-tuning-notes.md) for the full checklist with SQL queries, including:
 
-1. All 12 containers healthy
+1. All 13 long-running containers healthy
 2. PostgreSQL tuning parameters applied correctly
 3. Connection usage within budget
 4. Supavisor pooler accepting connections
@@ -277,7 +311,7 @@ psql "postgresql://postgres.YOUR_TENANT:YOUR_PASSWORD@SERVER_IP:6544/postgres?pg
 
 ## PostgreSQL 17 Upgrade Notes
 
-These templates use PostgreSQL 17 (`supabase/postgres:17.6.1.081`).
+These templates use PostgreSQL 17 (`supabase/postgres:17.6.1.136`).
 
 ### New deployments
 
@@ -310,6 +344,55 @@ Requires both PG15 and PG17 binaries. See [Supabase upgrade docs](https://supaba
 - **Authentication**: Supabase prefers `scram-sha-256` over `md5`. Custom roles may need password reset.
 - **Logical replication**: Slots are NOT preserved during major version upgrades.
 - **Expression indexes**: May need explicit `search_path` on referenced functions.
+- **pg_graphql is not installed on fresh databases** (upstream change in `17.6.1.136`). `/graphql/v1` answers `pg_graphql extension is not enabled` until you run `create extension pg_graphql;`. Databases that already have it keep it.
+
+## Upgrading an existing deployment
+
+Deployments created from an older version of these templates can be upgraded in
+place: paste the new compose file, update the env vars listed below, and
+redeploy. The Postgres image only moves within the 17.6.x line, so the data
+directory is reused as-is. **[`UPGRADE-GUIDE.md`](UPGRADE-GUIDE.md) walks through
+this step by step**, with backups, verification, optional JWT secret rotation and
+rollback; the table below is the summary.
+
+| Change | What to do |
+|--------|------------|
+| JWT secret removed from the database | Nothing. The `db-jwt-reset` job runs on deploy and resets `app.settings.jwt_secret`. Check its log for `OK: app.settings.jwt_secret is not stored in the database`. If you prefer to do it by hand: `docker exec <prefix>-db psql -U supabase_admin -d postgres -c 'ALTER DATABASE postgres RESET "app.settings.jwt_secret"'`. |
+| `API_EXTERNAL_URL` now ends with `/auth/v1` | Append `/auth/v1` to the existing value. New tokens get this value as their `iss` claim, so update any client that validates `iss`, and update OAuth provider callback URLs if you use social login. |
+| Studio and postgres-meta connect as `postgres` (was `supabase_admin`) | Objects created from Studio before the upgrade are owned by `supabase_admin`, and `postgres` cannot alter them. Either run the SQL below once, or set `STUDIO_DB_USER=supabase_admin` to keep the old behaviour. |
+| `PGRST_DB_SCHEMAS` default is `public,graphql_public` | `storage` is a protected schema and is no longer exposed over REST by upstream. Add it back only if your app queries `storage.objects` through the REST API. |
+| `IMGPROXY_ENABLE_WEBP_DETECTION` renamed | Use `IMGPROXY_AUTO_WEBP=true`. |
+| `LOGFLARE_LOGGER_BACKEND_API_KEY` removed | Only `LOGFLARE_PUBLIC_ACCESS_TOKEN` and `LOGFLARE_PRIVATE_ACCESS_TOKEN` are used now. |
+| New required `S3_PROTOCOL_ACCESS_KEY_ID` / `S3_PROTOCOL_ACCESS_KEY_SECRET` | Generate them; they protect the S3-compatible endpoint at `/storage/v1/s3`. |
+| Kong: `/rest/v1/` OpenAPI root is service-role only, Realtime `/api/tenants` and `/api/openapi` are blocked | Upstream security hardening. Normal `/rest/v1/<table>` and Realtime websocket access are unaffected. |
+| Edge functions main worker | `functions-init` only seeds files that do not exist. To pick up the new upstream worker (hybrid HS256/ES256 verification, `deno.jsonc` import map), delete `files/volumes/functions/main/index.ts` before redeploying. |
+
+Reassign Studio-created objects in `public` to `postgres` (adapted from upstream
+`utils/reassign-owner.sh`, run once as `supabase_admin`):
+
+```sql
+DO $$
+DECLARE rec record;
+BEGIN
+  FOR rec IN SELECT c.relname FROM pg_class c
+    WHERE c.relnamespace = 'public'::regnamespace AND c.relowner = 'supabase_admin'::regrole
+      AND c.relkind IN ('r','v','S','m','p')
+      AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid='pg_class'::regclass AND d.objid=c.oid AND d.deptype='e')
+  LOOP EXECUTE format('ALTER TABLE public.%I OWNER TO postgres', rec.relname); END LOOP;
+  FOR rec IN SELECT p.proname, pg_get_function_identity_arguments(p.oid) AS args FROM pg_proc p
+    WHERE p.pronamespace = 'public'::regnamespace AND p.proowner = 'supabase_admin'::regrole
+      AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid='pg_proc'::regclass AND d.objid=p.oid AND d.deptype='e')
+  LOOP EXECUTE format('ALTER ROUTINE public.%I(%s) OWNER TO postgres', rec.proname, rec.args); END LOOP;
+  FOR rec IN SELECT t.typname FROM pg_type t
+    WHERE t.typnamespace = 'public'::regnamespace AND t.typowner = 'supabase_admin'::regrole AND t.typrelid = 0
+      AND NOT EXISTS (SELECT 1 FROM pg_type el WHERE el.oid = t.typelem AND el.typarray = t.oid)
+      AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid='pg_type'::regclass AND d.objid=t.oid AND d.deptype='e')
+  LOOP EXECUTE format('ALTER TYPE public.%I OWNER TO postgres', rec.typname); END LOOP;
+END $$;
+```
+
+Custom schemas need the same treatment by hand. Verify with `select current_user;`
+in the Studio SQL editor, which should return `postgres`.
 
 ## Troubleshooting
 
@@ -341,7 +424,11 @@ Common causes:
 
 ### PostgREST schema errors
 
-PostgREST v14 validates schemas on startup. If `PGRST_DB_SCHEMAS` references a schema that doesn't exist, it will fail. Default is `public,storage,graphql_public` which all exist in a standard Supabase setup.
+PostgREST v14 validates schemas on startup. If `PGRST_DB_SCHEMAS` references a schema that doesn't exist, it will fail. Default is `public,graphql_public` which both exist in a standard Supabase setup.
+
+### GraphQL returns "pg_graphql extension is not enabled"
+
+Fresh Postgres `17.6.1.136` databases no longer install `pg_graphql` by default. Run `create extension pg_graphql;` as `supabase_admin` (or from the Studio SQL editor) and it works immediately.
 
 ### Realtime hitting connection limits
 

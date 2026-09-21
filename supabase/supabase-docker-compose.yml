@@ -28,9 +28,11 @@ configs:
         - username: anon
           keyauth_credentials:
             - key: $$SUPABASE_ANON_KEY
+            - key: $$SUPABASE_PUBLISHABLE_KEY
         - username: service_role
           keyauth_credentials:
             - key: $$SUPABASE_SERVICE_KEY
+            - key: $$SUPABASE_SECRET_KEY
 
       ###
       ### Access Control List
@@ -55,6 +57,7 @@ configs:
       services:
         ## Open Auth routes
         - name: auth-v1-open
+          _comment: 'Auth: /auth/v1/verify* -> http://auth:9999/verify*'
           url: http://auth:9999/verify
           routes:
             - name: auth-v1-open
@@ -64,6 +67,7 @@ configs:
           plugins:
             - name: cors
         - name: auth-v1-open-callback
+          _comment: 'Auth: /auth/v1/callback* -> http://auth:9999/callback*'
           url: http://auth:9999/callback
           routes:
             - name: auth-v1-open-callback
@@ -73,6 +77,7 @@ configs:
           plugins:
             - name: cors
         - name: auth-v1-open-authorize
+          _comment: 'Auth: /auth/v1/authorize* -> http://auth:9999/authorize*'
           url: http://auth:9999/authorize
           routes:
             - name: auth-v1-open-authorize
@@ -81,10 +86,40 @@ configs:
                 - /auth/v1/authorize
           plugins:
             - name: cors
+        - name: auth-v1-open-jwks
+          _comment: 'Auth: /auth/v1/.well-known/jwks.json -> http://auth:9999/.well-known/jwks.json'
+          url: http://auth:9999/.well-known/jwks.json
+          routes:
+            - name: auth-v1-open-jwks
+              strip_path: true
+              paths:
+                - /auth/v1/.well-known/jwks.json
+          plugins:
+            - name: cors
+
+        - name: auth-v1-open-sso-acs
+          url: "http://auth:9999/sso/saml/acs"
+          routes:
+            - name: auth-v1-open-sso-acs
+              strip_path: true
+              paths:
+              - /auth/v1/sso/saml/acs
+          plugins:
+            - name: cors
+
+        - name: auth-v1-open-sso-metadata
+          url: "http://auth:9999/sso/saml/metadata"
+          routes:
+            - name: auth-v1-open-sso-metadata
+              strip_path: true
+              paths:
+              - /auth/v1/sso/saml/metadata
+          plugins:
+            - name: cors
 
         ## Secure Auth routes
         - name: auth-v1
-          _comment: 'GoTrue: /auth/v1/* -> http://auth:9999/*'
+          _comment: 'Auth: /auth/v1/* -> http://auth:9999/*'
           url: http://auth:9999/
           routes:
             - name: auth-v1-all
@@ -96,6 +131,14 @@ configs:
             - name: key-auth
               config:
                 hide_credentials: false
+            - name: request-transformer
+              config:
+                add:
+                  headers:
+                    - "Authorization: $$LUA_AUTH_EXPR"
+                replace:
+                  headers:
+                    - "Authorization: $$LUA_AUTH_EXPR"
             - name: acl
               config:
                 hide_groups_header: true
@@ -103,7 +146,34 @@ configs:
                   - admin
                   - anon
 
-        ## Secure REST routes
+        ## OpenAPI root - admin only
+        - name: rest-v1-openapi
+          _comment: 'PostgREST OpenAPI root: /rest/v1/ -> <http://rest:3000/> (admin only). See <https://github.com/orgs/supabase/discussions/42949>'
+          url: http://rest:3000/
+          routes:
+            - name: rest-v1-openapi-root
+              strip_path: true
+              expression: 'http.path == "/rest/v1/"'
+          plugins:
+            - name: cors
+            - name: key-auth
+              config:
+                hide_credentials: false
+            - name: request-transformer
+              config:
+                add:
+                  headers:
+                    - "Authorization: $$LUA_AUTH_EXPR"
+                replace:
+                  headers:
+                    - "Authorization: $$LUA_AUTH_EXPR"
+            - name: acl
+              config:
+                hide_groups_header: true
+                allow:
+                  - admin
+
+        ## Secure PostgREST routes
         - name: rest-v1
           _comment: 'PostgREST: /rest/v1/* -> http://rest:3000/*'
           url: http://rest:3000/
@@ -116,7 +186,15 @@ configs:
             - name: cors
             - name: key-auth
               config:
-                hide_credentials: true
+                hide_credentials: false
+            - name: request-transformer
+              config:
+                add:
+                  headers:
+                    - "Authorization: $$LUA_AUTH_EXPR"
+                replace:
+                  headers:
+                    - "Authorization: $$LUA_AUTH_EXPR"
             - name: acl
               config:
                 hide_groups_header: true
@@ -137,12 +215,16 @@ configs:
             - name: cors
             - name: key-auth
               config:
-                hide_credentials: true
+                hide_credentials: false
             - name: request-transformer
               config:
                 add:
                   headers:
-                    - Content-Profile:graphql_public
+                    - "Content-Profile: graphql_public"
+                    - "Authorization: $$LUA_AUTH_EXPR"
+                replace:
+                  headers:
+                    - "Authorization: $$LUA_AUTH_EXPR"
             - name: acl
               config:
                 hide_groups_header: true
@@ -165,14 +247,55 @@ configs:
             - name: key-auth
               config:
                 hide_credentials: false
+            - name: request-transformer
+              config:
+                add:
+                  headers:
+                    - "x-api-key:$$LUA_RT_WS_EXPR"
+                replace:
+                  querystring:
+                    - "apikey:$$LUA_RT_WS_EXPR"
             - name: acl
               config:
                 hide_groups_header: true
                 allow:
                   - admin
                   - anon
+
+        # Block access to /realtime/v1/api/openapi
+        - name: realtime-v1-rest-openapi
+          _comment: 'Realtime: /realtime/v1/api/openapi/* -> http://realtime:4000/api/openapi/* (blocked)'
+          url: http://realtime-dev.${CONTAINER_PREFIX}-realtime:4000/api/openapi
+          protocol: http
+          routes:
+            - name: realtime-v1-rest-openapi
+              strip_path: true
+              paths:
+                - /realtime/v1/api/openapi
+          plugins:
+            - name: request-termination
+              config:
+                status_code: 403
+                message: "Access is forbidden."
+
+        # Block access to /realtime/v1/api/tenants
+        - name: realtime-v1-rest-tenants
+          _comment: 'Realtime: /realtime/v1/api/tenants/* -> http://realtime:4000/api/tenants/* (blocked)'
+          url: http://realtime-dev.${CONTAINER_PREFIX}-realtime:4000/api/tenants
+          protocol: http
+          routes:
+            - name: realtime-v1-rest-tenants
+              strip_path: true
+              paths:
+                - /realtime/v1/api/tenants
+          plugins:
+            - name: request-termination
+              config:
+                status_code: 403
+                message: "Access is forbidden."
+
         - name: realtime-v1-rest
-          _comment: 'Realtime: /realtime/v1/* -> ws://realtime:4000/socket/*'
+          _comment: 'Realtime: /realtime/v1/api/* -> http://realtime:4000/api/*'
           url: http://realtime-dev.${CONTAINER_PREFIX}-realtime:4000/api
           protocol: http
           routes:
@@ -185,13 +308,30 @@ configs:
             - name: key-auth
               config:
                 hide_credentials: false
+            - name: request-transformer
+              config:
+                add:
+                  headers:
+                    - "Authorization: $$LUA_AUTH_EXPR"
+                replace:
+                  headers:
+                    - "Authorization: $$LUA_AUTH_EXPR"
             - name: acl
               config:
                 hide_groups_header: true
                 allow:
                   - admin
                   - anon
-        ## Storage routes: the storage server manages its own auth
+
+        ## Storage API endpoint (with Authorization header transformation).
+        ## No key-auth - S3 protocol requests don't carry an apikey header.
+        ##
+        ## The request-transformer translates opaque API keys to asymmetric JWTs
+        ## and passes through existing Authorization headers (user JWTs, AWS SigV4).
+        ## When no Authorization or apikey header is present (S3 presigned URLs),
+        ## the Lua expression evaluates to nil which Kong renders as empty string.
+        ## The post-function strips this empty header so Storage's S3 signature
+        ## verification falls through to query-parameter parsing.
         - name: storage-v1
           _comment: 'Storage: /storage/v1/* -> http://storage:5000/*'
           url: http://storage:5000/
@@ -202,11 +342,28 @@ configs:
                 - /storage/v1/
           plugins:
             - name: cors
+            - name: request-transformer
+              config:
+                add:
+                  headers:
+                    - "Authorization: $$LUA_AUTH_EXPR"
+                replace:
+                  headers:
+                    - "Authorization: $$LUA_AUTH_EXPR"
+            - name: post-function
+              config:
+                access:
+                  - |
+                    local auth = kong.request.get_header("authorization")
+                    if auth == nil or auth == "" or auth:find("^%s*$$") then
+                      kong.service.request.clear_header("authorization")
+                    end
 
         ## Edge Functions routes
         - name: functions-v1
           _comment: 'Edge Functions: /functions/v1/* -> http://functions:9000/*'
           url: http://functions:9000/
+          read_timeout: 150000
           routes:
             - name: functions-v1-all
               strip_path: true
@@ -215,15 +372,42 @@ configs:
           plugins:
             - name: cors
 
-        ## Analytics routes
-        - name: analytics-v1
-          _comment: 'Analytics: /analytics/v1/* -> http://logflare:4000/*'
-          url: http://analytics:4000/
+        ## OAuth 2.0 Authorization Server Metadata (RFC 8414)
+        - name: well-known-oauth
+          _comment: 'Auth: /.well-known/oauth-authorization-server -> http://auth:9999/.well-known/oauth-authorization-server'
+          url: http://auth:9999/.well-known/oauth-authorization-server
           routes:
-            - name: analytics-v1-all
+            - name: well-known-oauth
               strip_path: true
               paths:
-                - /analytics/v1/
+                - /.well-known/oauth-authorization-server
+          plugins:
+            - name: cors
+
+        ## Analytics routes
+        ## Not used - Studio and Vector talk directly to analytics via Docker networking.
+        ## If external access is needed, add routes with key-auth matching Logflare's x-api-key auth.
+        # - name: analytics-v1-api
+        #   _comment: 'Analytics: /analytics/v1/api/endpoints/* -> http://logflare:4000/api/endpoints/*'
+        #   url: http://analytics:4000/api/endpoints
+        #   routes:
+        #     - name: analytics-v1-api
+        #       strip_path: true
+        #       paths:
+        #         - /analytics/v1/api/endpoints/
+        # - name: analytics-v1
+        #   _comment: 'Analytics: /analytics/v1/* -> http://logflare:4000/*'
+        #   url: http://analytics:4000/
+        #   routes:
+        #     - name: dashboard-v1-all
+        #       strip_path: true
+        #       paths:
+        #         - /analytics/v1
+        #   plugins:
+        #     - name: cors
+        #     - name: basic-auth
+        #       config:
+        #         hide_credentials: true
 
         ## Secure Database routes
         - name: meta
@@ -269,15 +453,15 @@ configs:
               paths:
                 - /mcp
           plugins:
-            ## Block access to /mcp by default
+            # Block access to /mcp by default
             - name: request-termination
               config:
                 status_code: 403
                 message: "Access is forbidden."
-            ## Enable local access (danger zone!)
-            ## 1. Comment out the 'request-termination' section above
-            ## 2. Uncomment the entire section below, including 'deny'
-            ## 3. Add your local IPs to the 'allow' list
+            # Enable local access (danger zone!)
+            # 1. Comment out the 'request-termination' section above
+            # 2. Uncomment the entire section below, including 'deny'
+            # 3. Add your local IPs to the 'allow' list
             #- name: cors
             #- name: ip-restriction
             #  config:
@@ -300,6 +484,58 @@ configs:
             - name: basic-auth
               config:
                 hide_credentials: true
+
+  kong_entrypoint:
+    content: |
+      #!/bin/sh
+      # Custom entrypoint for Kong that builds Lua expressions for request-transformer
+      # and performs environment variable substitution in the declarative config.
+
+      # Build Lua expressions for translating opaque API keys to asymmetric JWTs.
+      # When opaque keys are not configured (empty env vars), expressions fall through
+      # to legacy-only behavior - just passing apikey as-is.
+      #
+      # Full expression logic (when opaque keys are configured):
+      #   1. If Authorization header exists and is NOT an sb_ key -> pass through (user session JWT)
+      #   2. If apikey matches secret key -> set service_role asymmetric JWT internal "API key"
+      #   3. If apikey matches publishable key -> set anon asymmetric JWT internal "API key"
+      #   4. Fallback: pass apikey as-is (legacy HS256 JWT)
+
+      if [ -n "$$SUPABASE_SECRET_KEY" ] && [ -n "$$SUPABASE_PUBLISHABLE_KEY" ]; then
+          # Opaque keys configured -> full translation expressions
+          export LUA_AUTH_EXPR="\$$((headers.authorization ~= nil and headers.authorization:sub(1, 10) ~= 'Bearer sb_' and headers.authorization) or (headers.apikey == '$$SUPABASE_SECRET_KEY' and 'Bearer $$SERVICE_ROLE_KEY_ASYMMETRIC') or (headers.apikey == '$$SUPABASE_PUBLISHABLE_KEY' and 'Bearer $$ANON_KEY_ASYMMETRIC') or headers.apikey)"
+
+          # Realtime WebSocket: reads from query_params.apikey (supabase-js sends apikey
+          # via query string), outputs to x-api-key header which Realtime checks first.
+          export LUA_RT_WS_EXPR="\$$((query_params.apikey == '$$SUPABASE_SECRET_KEY' and '$$SERVICE_ROLE_KEY_ASYMMETRIC') or (query_params.apikey == '$$SUPABASE_PUBLISHABLE_KEY' and '$$ANON_KEY_ASYMMETRIC') or query_params.apikey)"
+      else
+          # Legacy API keys, not sb_ API keys -> pass apikey through unchanged
+          export LUA_AUTH_EXPR="\$$((headers.authorization ~= nil and headers.authorization:sub(1, 10) ~= 'Bearer sb_' and headers.authorization) or headers.apikey)"
+          export LUA_RT_WS_EXPR="\$$(query_params.apikey)"
+      fi
+
+      # Substitute environment variables in the Kong declarative config.
+      # Uses awk instead of eval/echo to preserve YAML quoting (eval strips double
+      # quotes, breaking "Header: value" patterns that YAML parses as mappings).
+      awk '{
+        result = ""
+        rest = $$0
+        while (match(rest, /\$$[A-Za-z_][A-Za-z_0-9]*/)) {
+          varname = substr(rest, RSTART + 1, RLENGTH - 1)
+          if (varname in ENVIRON) {
+            result = result substr(rest, 1, RSTART - 1) ENVIRON[varname]
+          } else {
+            result = result substr(rest, 1, RSTART + RLENGTH - 1)
+          }
+          rest = substr(rest, RSTART + RLENGTH)
+        }
+        print result rest
+      }' /usr/local/kong/temp.yml > "$$KONG_DECLARATIVE_CONFIG"
+
+      # Remove empty key-auth credentials (unconfigured opaque keys)
+      sed -i '/^[[:space:]]*- key:[[:space:]]*$$/d' "$$KONG_DECLARATIVE_CONFIG"
+
+      exec /entrypoint.sh kong docker-start
 
   vector_config:
     content: |
@@ -340,7 +576,9 @@ configs:
             rest: '.appname == "${CONTAINER_PREFIX}-rest"'
             realtime: '.appname == "realtime-dev.${CONTAINER_PREFIX}-realtime"'
             storage: '.appname == "${CONTAINER_PREFIX}-storage"'
+            functions: '.appname == "${CONTAINER_PREFIX}-functions"'
             db: '.appname == "${CONTAINER_PREFIX}-db"'
+        # Ignores non nginx errors since they are related with kong booting up
         kong_logs:
           type: remap
           inputs:
@@ -352,14 +590,18 @@ configs:
                 .metadata.request.headers.referer = req.referer
                 .metadata.request.headers.user_agent = req.agent
                 .metadata.request.headers.cf_connecting_ip = req.client
-                .metadata.request.method = req.method
-                .metadata.request.path = req.path
-                .metadata.request.protocol = req.protocol
                 .metadata.response.status_code = req.status
+                url, split_err = split(req.request, " ")
+                if split_err == null {
+                    .metadata.request.method = url[0]
+                    .metadata.request.path = url[1]
+                    .metadata.request.protocol = url[2]
+                }
             }
             if err != null {
               abort
             }
+        # Ignores non nginx errors since they are related with kong booting up
         kong_err:
           type: remap
           inputs:
@@ -383,6 +625,7 @@ configs:
             if err != null {
               abort
             }
+        # Gotrue logs are structured json strings which frontend parses directly. But we keep metadata for consistency.
         auth_logs:
           type: remap
           inputs:
@@ -393,6 +636,7 @@ configs:
                 .metadata.timestamp = parsed.time
                 .metadata = merge!(.metadata, parsed)
             }
+        # PostgREST logs are structured so we separate timestamp from message using regex
         rest_logs:
           type: remap
           inputs:
@@ -401,14 +645,16 @@ configs:
             parsed, err = parse_regex(.event_message, r'^(?P<time>.*): (?P<msg>.*)$$')
             if err == null {
                 .event_message = parsed.msg
-                .timestamp = parse_timestamp!(value: parsed.time, format: "%d/%b/%Y:%H:%M:%S %z")
+                .timestamp = parse_timestamp!(value: parsed.time,format: "%d/%b/%Y:%H:%M:%S %z")
                 .metadata.host = .project
             }
+        # Filter out healthcheck logs from Realtime
         realtime_logs_filtered:
           type: filter
           inputs:
             - router.realtime
           condition: '!contains(string!(.event_message), "/health")'
+        # Realtime logs are structured so we parse the severity level using regex (ignore time because it has no date)
         realtime_logs:
           type: remap
           inputs:
@@ -421,6 +667,14 @@ configs:
                 .event_message = parsed.msg
                 .metadata.level = parsed.level
             }
+        # Function logs are unstructured messages on stderr
+        functions_logs:
+          type: remap
+          inputs:
+            - router.functions
+          source: |-
+            .metadata.project_ref = del(.project)
+        # Storage logs may contain json objects so we parse them for completeness
         storage_logs:
           type: remap
           inputs:
@@ -436,6 +690,7 @@ configs:
                 .metadata.context[0].host = parsed.hostname
                 .metadata.context[0].pid = parsed.pid
             }
+        # Postgres logs some messages to stderr which we map to warning severity level
         db_logs:
           type: remap
           inputs:
@@ -466,7 +721,8 @@ configs:
             codec: 'json'
           method: 'post'
           request:
-            retry_max_duration_secs: 10
+            retry_max_duration_secs: 30
+            retry_initial_backoff_secs: 1
             headers:
               x-api-key: $${LOGFLARE_PUBLIC_ACCESS_TOKEN?LOGFLARE_PUBLIC_ACCESS_TOKEN is required}
           uri: 'http://analytics:4000/api/logs?source_name=gotrue.logs.prod'
@@ -478,7 +734,8 @@ configs:
             codec: 'json'
           method: 'post'
           request:
-            retry_max_duration_secs: 10
+            retry_max_duration_secs: 30
+            retry_initial_backoff_secs: 1
             headers:
               x-api-key: $${LOGFLARE_PUBLIC_ACCESS_TOKEN?LOGFLARE_PUBLIC_ACCESS_TOKEN is required}
           uri: 'http://analytics:4000/api/logs?source_name=realtime.logs.prod'
@@ -490,7 +747,8 @@ configs:
             codec: 'json'
           method: 'post'
           request:
-            retry_max_duration_secs: 10
+            retry_max_duration_secs: 30
+            retry_initial_backoff_secs: 1
             headers:
               x-api-key: $${LOGFLARE_PUBLIC_ACCESS_TOKEN?LOGFLARE_PUBLIC_ACCESS_TOKEN is required}
           uri: 'http://analytics:4000/api/logs?source_name=postgREST.logs.prod'
@@ -502,10 +760,26 @@ configs:
             codec: 'json'
           method: 'post'
           request:
-            retry_max_duration_secs: 10
+            retry_max_duration_secs: 30
+            retry_initial_backoff_secs: 1
             headers:
               x-api-key: $${LOGFLARE_PUBLIC_ACCESS_TOKEN?LOGFLARE_PUBLIC_ACCESS_TOKEN is required}
-          uri: 'http://kong:8000/analytics/v1/api/logs?source_name=postgres.logs'
+          # Route directly to analytics like other sinks. Retry handles the startup
+          # race where analytics may not be ready yet when early DB logs arrive.
+          uri: 'http://analytics:4000/api/logs?source_name=postgres.logs'
+        logflare_functions:
+          type: 'http'
+          inputs:
+            - functions_logs
+          encoding:
+            codec: 'json'
+          method: 'post'
+          request:
+            retry_max_duration_secs: 30
+            retry_initial_backoff_secs: 1
+            headers:
+              x-api-key: $${LOGFLARE_PUBLIC_ACCESS_TOKEN?LOGFLARE_PUBLIC_ACCESS_TOKEN is required}
+          uri: 'http://analytics:4000/api/logs?source_name=deno-relay-logs'
         logflare_storage:
           type: 'http'
           inputs:
@@ -514,7 +788,8 @@ configs:
             codec: 'json'
           method: 'post'
           request:
-            retry_max_duration_secs: 10
+            retry_max_duration_secs: 30
+            retry_initial_backoff_secs: 1
             headers:
               x-api-key: $${LOGFLARE_PUBLIC_ACCESS_TOKEN?LOGFLARE_PUBLIC_ACCESS_TOKEN is required}
           uri: 'http://analytics:4000/api/logs?source_name=storage.logs.prod.2'
@@ -527,7 +802,8 @@ configs:
             codec: 'json'
           method: 'post'
           request:
-            retry_max_duration_secs: 10
+            retry_max_duration_secs: 30
+            retry_initial_backoff_secs: 1
             headers:
               x-api-key: $${LOGFLARE_PUBLIC_ACCESS_TOKEN?LOGFLARE_PUBLIC_ACCESS_TOKEN is required}
           uri: 'http://analytics:4000/api/logs?source_name=cloudflare.logs.prod'
@@ -790,13 +1066,269 @@ configs:
       ALTER USER supabase_functions_admin WITH PASSWORD :'pgpass';
       ALTER USER supabase_storage_admin WITH PASSWORD :'pgpass';
 
+  # SECURITY: only the (non-secret) JWT expiry is stored as a database setting.
+  # The JWT signing secret used to be written here as app.settings.jwt_secret,
+  # which any database role could read with current_setting() and use to mint
+  # service_role tokens (supabase/supabase#43513, fixed upstream in #45003).
+  # Existing databases are cleaned up by the db-jwt-reset one-shot service below.
   db_jwt_sql:
     content: |
-      \set jwt_secret `echo "$$JWT_SECRET"`
       \set jwt_exp `echo "$$JWT_EXP"`
 
-      ALTER DATABASE postgres SET "app.settings.jwt_secret" TO :'jwt_secret';
       ALTER DATABASE postgres SET "app.settings.jwt_exp" TO :'jwt_exp';
+
+  functions_main_index:
+    content: |
+      import * as jose from 'jsr:@panva/jose@6'
+
+      console.log('main function started')
+
+      const JWT_SECRET = Deno.env.get('JWT_SECRET')
+      const SUPABASE_JWKS = parseJwks(Deno.env.get('SUPABASE_JWKS'))
+      const LOCAL_JWKS = SUPABASE_JWKS ? jose.createLocalJWKSet(SUPABASE_JWKS) : null
+      const VERIFY_JWT = Deno.env.get('VERIFY_JWT') === 'true'
+
+      type AuthFailure = {
+        code: RequestErrors
+        message?: string
+      }
+
+      export enum RequestErrors {
+        InvalidLegacyJWT = 'UNAUTHORIZED_LEGACY_JWT',
+        InvalidAsymmetricJWT = 'UNAUTHORIZED_ASYMMETRIC_JWT',
+        InvalidTokenFormat = 'UNAUTHORIZED_INVALID_JWT_FORMAT',
+        UnsupportedTokenAlgorithm = 'UNAUTHORIZED_UNSUPPORTED_TOKEN_ALGORITHM',
+        MissingAuthHeader = 'UNAUTHORIZED_NO_AUTH_HEADER',
+      }
+
+      // NOTE:(kallebysantos) We don't check for valid keys but just the bare array parsing,
+      // let this for 'jose' lib verification
+      export function parseJwks(raw: string | undefined): jose.JSONWebKeySet | null {
+        if (!raw) return null
+        try {
+          const parsed = JSON.parse(raw)
+          if (parsed?.keys && Array.isArray(parsed.keys)) {
+            return parsed as jose.JSONWebKeySet
+          }
+          return null
+        } catch {
+          return null
+        }
+      }
+
+      /**
+       * Extract JWT token from Authorization header
+       *
+       * Parses the Authorization header to extract the Bearer token.
+       * Expects format: "Bearer <token>"
+       *
+       * @param req - The HTTP request object
+       * @returns The JWT token string or an authentication failure
+       */
+      function getAuthToken(req: Request): string | AuthFailure {
+        const authHeader = req.headers.get('authorization')
+        if (!authHeader) {
+          return {
+            code: RequestErrors.MissingAuthHeader,
+            message: 'Missing authorization header',
+          }
+        }
+        const tokenParts = authHeader.trim().split(/\s+/)
+        const [bearer, token] = tokenParts
+        if (bearer.toLowerCase() !== 'bearer' || tokenParts.length !== 2 || !token) {
+          return {
+            code: RequestErrors.InvalidTokenFormat,
+            message: 'Invalid JWT format',
+          }
+        }
+        return token
+      }
+
+      function getAuthErrorResponse({ code, message = 'Invalid JWT' }: AuthFailure) {
+        return Response.json(
+          {
+            code,
+            message,
+            // DEPRECATED: Retained for backward compatibility.
+            msg: message,
+          },
+          {
+            status: 401,
+            headers: {
+              'sb-error-code': code,
+              'Access-Control-Expose-Headers': 'sb-error-code',
+            },
+          }
+        )
+      }
+
+      async function isValidLegacyJWT(jwt: string): Promise<AuthFailure | null> {
+        if (!JWT_SECRET) {
+          console.error('JWT_SECRET not available for HS256 token verification')
+          return { code: RequestErrors.InvalidLegacyJWT }
+        }
+
+        const encoder = new TextEncoder();
+        const secretKey = encoder.encode(JWT_SECRET);
+
+        try {
+          await jose.jwtVerify(jwt, secretKey);
+        } catch (e) {
+          console.error('Symmetric Legacy JWT verification error', e);
+          return { code: RequestErrors.InvalidLegacyJWT }
+        }
+        return null
+      }
+
+      async function isValidJWT(jwt: string): Promise<AuthFailure | null> {
+        if (!LOCAL_JWKS) {
+          console.error('JWKS not available for ES256/RS256 token verification')
+          return { code: RequestErrors.InvalidAsymmetricJWT }
+        }
+
+        try {
+          await jose.jwtVerify(jwt, LOCAL_JWKS);
+        } catch (e) {
+          console.error('Asymmetric JWT verification error', e);
+          return { code: RequestErrors.InvalidAsymmetricJWT }
+        }
+
+        return null
+      }
+
+      /**
+       * Verify JWT token, handling both legacy (HS256) and newer (ES256/RS256) algorithms
+       * 
+       * This function automatically detects the algorithm used in the token and applies
+       * the appropriate verification method:
+       * - HS256: Uses JWT_SECRET (symmetric key)
+       * - ES256/RS256: Uses JWKS endpoint (asymmetric public keys)
+       * 
+       * This fix ensures compatibility with both legacy tokens and newer asymmetric tokens,
+       * resolving the "Key for the ES256 algorithm must be of type CryptoKey" error.
+       * 
+       * @param jwt - The JWT token string to verify
+       * @returns Authentication failure details, or null when verification succeeds
+       */
+      async function isValidHybridJWT(jwt: string): Promise<AuthFailure | null> {
+        let jwtAlgorithm: string | undefined
+        try {
+          jwtAlgorithm = jose.decodeProtectedHeader(jwt).alg
+        } catch (e) {
+          console.error('JWT format error', e)
+          return {
+            code: RequestErrors.InvalidTokenFormat,
+            message: 'Invalid JWT format',
+          }
+        }
+
+        if (!jwtAlgorithm) {
+          return {
+            code: RequestErrors.InvalidTokenFormat,
+            message: 'Invalid JWT format',
+          }
+        }
+
+        if (jwtAlgorithm === 'HS256') {
+          console.log(`Legacy token type detected, attempting $${jwtAlgorithm} verification.`)
+
+          return await isValidLegacyJWT(jwt)
+        }
+
+        if (jwtAlgorithm === 'ES256' || jwtAlgorithm === 'RS256') {
+          return await isValidJWT(jwt)
+        }
+
+        return {
+          code: RequestErrors.UnsupportedTokenAlgorithm,
+          message: `Unsupported JWT algorithm $${jwtAlgorithm}`,
+        }
+      }
+
+      Deno.serve(async (req: Request) => {
+        if (req.method !== 'OPTIONS' && VERIFY_JWT) {
+          try {
+            const token = getAuthToken(req)
+            if (typeof token !== 'string') {
+              return getAuthErrorResponse(token)
+            }
+            const authFailure = await isValidHybridJWT(token)
+            if (authFailure) {
+              return getAuthErrorResponse(authFailure)
+            }
+          } catch (e) {
+            console.error(e)
+            return getAuthErrorResponse({
+              code: RequestErrors.InvalidTokenFormat,
+              message: 'Invalid JWT format',
+            })
+          }
+        }
+
+        const url = new URL(req.url)
+        const { pathname } = url
+        const path_parts = pathname.split('/')
+        const service_name = path_parts[1]
+
+        if (!service_name || service_name === '') {
+          const error = { msg: 'missing function name in request' }
+          return new Response(JSON.stringify(error), {
+            status: 400,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        }
+
+        const servicePath = `/home/deno/functions/$${service_name}`
+        console.error(`serving the request with $${servicePath}`)
+
+        const memoryLimitMb = parseInt(Deno.env.get('FUNCTIONS_WORKER_MEMORY_MB') || '512')
+        const workerTimeoutMs = parseInt(Deno.env.get('FUNCTIONS_WORKER_TIMEOUT_MS') || '300000')
+        const noModuleCache = false
+        // Using a common Import Map for all functions 
+        // to use a scope 'deno.json' it must be dinamically resolved base on the 'service_name'
+        const importMapPath = `/home/deno/functions/deno.jsonc`
+        // SUPABASE_FUNCTION_SLUG is listed after the container env snapshot so
+        // nothing in it can shadow the value, and it is per-request because only this
+        // worker knows which function the request resolved to.
+        const envVarsObj = { ...Deno.env.toObject(), SUPABASE_FUNCTION_SLUG: service_name }
+        const envVars = Object.keys(envVarsObj).map((k) => [k, envVarsObj[k]])
+
+        try {
+          const worker = await EdgeRuntime.userWorkers.create({
+            servicePath,
+            memoryLimitMb,
+            workerTimeoutMs,
+            noModuleCache,
+            importMapPath,
+            envVars,
+          })
+          return await worker.fetch(req)
+        } catch (e) {
+          const error = { msg: e.toString() }
+          return new Response(JSON.stringify(error), {
+            status: 500,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        }
+      })
+
+  functions_deno_jsonc:
+    content: |
+      {
+        "imports": {
+          "@supabase/functions-js": "jsr:@supabase/functions-js@^2",
+          "@supabase/server": "npm:@supabase/server@^1"
+        }
+      }
+
+  functions_hello_index:
+    content: |
+      Deno.serve(async () => {
+        return new Response(
+          `"Hello from Edge Functions!"`,
+          { headers: { "Content-Type": "application/json" } },
+        )
+      })
 
   pooler_config:
     content: |
@@ -810,7 +1342,7 @@ configs:
 
       params = %{
         "external_id" => System.get_env("POOLER_TENANT_ID"),
-        "db_host" => "db",
+        "db_host" => System.get_env("POSTGRES_HOST") || "db",
         "db_port" => System.get_env("POSTGRES_PORT"),
         "db_database" => System.get_env("POSTGRES_DB"),
         "require_user" => false,
@@ -838,7 +1370,7 @@ services:
 
   studio:
     container_name: ${CONTAINER_PREFIX}-studio
-    image: supabase/studio:2026.04.27-sha-5f60601
+    image: supabase/studio:2026.09.07-sha-7996410
     restart: unless-stopped
     volumes:
       - ../files/volumes/snippets:/app/snippets:Z
@@ -846,24 +1378,36 @@ services:
     healthcheck:
       test:
         [
-          "CMD",
-          "node",
-          "-e",
-          "fetch('http://studio:3000/api/platform/profile').then((r) => {if (r.status !== 200) throw new Error(r.status)})"
+          "CMD-SHELL",
+          "node -e \"fetch('http://localhost:3000/api/platform/profile').then((r) => {if (r.status !== 200) throw new Error(r.status)})\""
         ]
       timeout: 10s
       interval: 5s
       retries: 3
+      start_period: 20s
     depends_on:
       analytics:
         condition: service_healthy
     environment:
-      HOSTNAME: "::"
+      # Listen on all IPv4 interfaces
+      HOSTNAME: "0.0.0.0"
       STUDIO_PG_META_URL: http://meta:8080
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_HOST: ${POSTGRES_HOST}
       POSTGRES_PORT: ${POSTGRES_PORT}
       POSTGRES_DB: ${POSTGRES_DB}
+
+      # Role Studio uses for SQL. Upstream default is the non-superuser `postgres`.
+      # Existing deployments whose objects were created as supabase_admin must
+      # either reassign ownership (see README "Upgrading an existing deployment")
+      # or set STUDIO_DB_USER=supabase_admin to keep the old behaviour.
+      # See: https://supabase.com/docs/guides/self-hosting/remove-superuser-access
+      POSTGRES_USER_READ_WRITE: ${STUDIO_DB_USER:-postgres}
+
+      PG_META_CRYPTO_KEY: ${PG_META_CRYPTO_KEY}
+      PGRST_DB_SCHEMAS: ${PGRST_DB_SCHEMAS}
+      PGRST_DB_MAX_ROWS: ${PGRST_DB_MAX_ROWS:-1000}
+      PGRST_DB_EXTRA_SEARCH_PATH: ${PGRST_DB_EXTRA_SEARCH_PATH:-public}
 
       DEFAULT_ORGANIZATION_NAME: ${STUDIO_DEFAULT_ORGANIZATION}
       DEFAULT_PROJECT_NAME: ${STUDIO_DEFAULT_PROJECT}
@@ -874,18 +1418,14 @@ services:
       SUPABASE_ANON_KEY: ${ANON_KEY}
       SUPABASE_SERVICE_KEY: ${SERVICE_ROLE_KEY}
       AUTH_JWT_SECRET: ${JWT_SECRET}
-      PG_META_CRYPTO_KEY: ${PG_META_CRYPTO_KEY}
+      # Optional new-style opaque API keys (sb_publishable_... / sb_secret_...)
+      SUPABASE_PUBLISHABLE_KEY: ${SUPABASE_PUBLISHABLE_KEY:-}
+      SUPABASE_SECRET_KEY: ${SUPABASE_SECRET_KEY:-}
 
-      # LOGFLARE_API_KEY is deprecated
-      LOGFLARE_API_KEY: ${LOGFLARE_PUBLIC_ACCESS_TOKEN}
-      LOGFLARE_PUBLIC_ACCESS_TOKEN: ${LOGFLARE_PUBLIC_ACCESS_TOKEN}
+      # Logs & analytics (Logflare) are bundled in this template
       LOGFLARE_PRIVATE_ACCESS_TOKEN: ${LOGFLARE_PRIVATE_ACCESS_TOKEN}
       LOGFLARE_URL: http://analytics:4000
-      NEXT_PUBLIC_ENABLE_LOGS: true
-      # Comment to use Big Query backend for analytics
-      NEXT_ANALYTICS_BACKEND_PROVIDER: postgres
-      # Uncomment to use Big Query backend for analytics
-      # NEXT_ANALYTICS_BACKEND_PROVIDER: bigquery
+      ENABLED_FEATURES_LOGS_ALL: "true"
 
       SNIPPETS_MANAGEMENT_FOLDER: /app/snippets
       EDGE_FUNCTIONS_MANAGEMENT_FOLDER: /app/edge-functions
@@ -897,7 +1437,7 @@ services:
 
   kong:
     container_name: ${CONTAINER_PREFIX}-kong
-    image: kong/kong:3.9.1
+    image: kong/kong:3.9.3
     restart: unless-stopped
     ulimits:
       nofile:
@@ -914,32 +1454,44 @@ services:
       - dokploy-network
     healthcheck:
       test: ["CMD", "kong", "health"]
-      interval: 10s
+      interval: 5s
       timeout: 5s
-      retries: 3
+      retries: 5
     configs:
       - source: kong_config
         target: /usr/local/kong/temp.yml
+      - source: kong_entrypoint
+        target: /usr/local/kong/kong-entrypoint.sh
     depends_on:
       analytics:
         condition: service_healthy
     environment:
       KONG_DATABASE: "off"
       KONG_DECLARATIVE_CONFIG: /usr/local/kong/kong.yml
+      # `expressions` is required for the /rest/v1/ OpenAPI root route
+      KONG_ROUTER_FLAVOR: expressions
       # https://github.com/supabase/cli/issues/14
       KONG_DNS_ORDER: LAST,A,CNAME
-      KONG_PLUGINS: request-transformer,cors,key-auth,acl,basic-auth,request-termination,ip-restriction
+      KONG_DNS_NOT_FOUND_TTL: 1
+      KONG_DNS_VALID_TTL: 5
+      KONG_PLUGINS: request-transformer,cors,key-auth,acl,basic-auth,request-termination,ip-restriction,post-function
       KONG_NGINX_PROXY_PROXY_BUFFER_SIZE: 160k
       KONG_NGINX_PROXY_PROXY_BUFFERS: 64 160k
+      KONG_PROXY_ACCESS_LOG: /dev/stdout combined
       SUPABASE_ANON_KEY: ${ANON_KEY}
       SUPABASE_SERVICE_KEY: ${SERVICE_ROLE_KEY}
+      # Optional new-style API keys; leave blank to use ANON_KEY/SERVICE_ROLE_KEY only
+      SUPABASE_PUBLISHABLE_KEY: ${SUPABASE_PUBLISHABLE_KEY:-}
+      SUPABASE_SECRET_KEY: ${SUPABASE_SECRET_KEY:-}
+      ANON_KEY_ASYMMETRIC: ${ANON_KEY_ASYMMETRIC:-}
+      SERVICE_ROLE_KEY_ASYMMETRIC: ${SERVICE_ROLE_KEY_ASYMMETRIC:-}
       DASHBOARD_USERNAME: ${DASHBOARD_USERNAME}
       DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD}
-    # https://unix.stackexchange.com/a/294837
-    # kong 3.9 runs as non-root (uid 1001) and has no /home/kong; write the
-    # interpolated declarative config to /usr/local/kong (writable) and use the
-    # 3.x entrypoint name (/entrypoint.sh, was /docker-entrypoint.sh in 2.x).
-    entrypoint: bash -c 'eval "echo \"$$(cat /usr/local/kong/temp.yml)\"" > /usr/local/kong/kong.yml && /entrypoint.sh kong docker-start'
+    # kong 3.9 runs as non-root (uid 1001) and has no /home/kong, so the template
+    # and the entrypoint live in /usr/local/kong (writable). The entrypoint does
+    # the env substitution with awk (preserves YAML quoting) and builds the Lua
+    # expressions used by the request-transformer plugin.
+    entrypoint: ["/bin/sh", "/usr/local/kong/kong-entrypoint.sh"]
     logging:
       driver: json-file
       options:
@@ -948,7 +1500,7 @@ services:
 
   auth:
     container_name: ${CONTAINER_PREFIX}-auth
-    image: supabase/gotrue:v2.186.0
+    image: supabase/gotrue:v2.196.0
     restart: unless-stopped
     healthcheck:
       test:
@@ -986,8 +1538,11 @@ services:
 
       GOTRUE_JWT_ADMIN_ROLES: service_role
       GOTRUE_JWT_AUD: authenticated
+      GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
       GOTRUE_JWT_EXP: ${JWT_EXPIRY}
       GOTRUE_JWT_SECRET: ${JWT_SECRET}
+      # `iss` claim of issued tokens; API_EXTERNAL_URL should end with /auth/v1
+      GOTRUE_JWT_ISSUER: ${API_EXTERNAL_URL}
 
       GOTRUE_EXTERNAL_EMAIL_ENABLED: ${ENABLE_EMAIL_SIGNUP}
       GOTRUE_EXTERNAL_ANONYMOUS_USERS_ENABLED: ${ENABLE_ANONYMOUS_USERS}
@@ -1019,7 +1574,7 @@ services:
 
   rest:
     container_name: ${CONTAINER_PREFIX}-rest
-    image: postgrest/postgrest:v14.8
+    image: postgrest/postgrest:v14.17
     restart: unless-stopped
     depends_on:
       db:
@@ -1027,13 +1582,24 @@ services:
         condition: service_healthy
       analytics:
         condition: service_healthy
+    healthcheck:
+      test: [ "CMD", "postgrest", "--ready" ]
+      interval: 5s
+      timeout: 5s
+      retries: 3
     environment:
       PGRST_DB_URI: postgres://authenticator:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
       PGRST_DB_SCHEMAS: ${PGRST_DB_SCHEMAS}
+      PGRST_DB_MAX_ROWS: ${PGRST_DB_MAX_ROWS:-1000}
+      PGRST_DB_EXTRA_SEARCH_PATH: ${PGRST_DB_EXTRA_SEARCH_PATH:-public}
       PGRST_DB_ANON_ROLE: anon
+      PGRST_ADMIN_SERVER_PORT: 3001
+      PGRST_ADMIN_SERVER_HOST: localhost
       PGRST_JWT_SECRET: ${JWT_SECRET}
       PGRST_DB_USE_LEGACY_GUCS: "false"
-      PGRST_APP_SETTINGS_JWT_SECRET: ${JWT_SECRET}
+      # SECURITY: PGRST_APP_SETTINGS_JWT_SECRET is intentionally NOT set. It made
+      # PostgREST run `SET LOCAL app.settings.jwt_secret` on every request, which
+      # exposed the signing secret to any SQL function (supabase/supabase#43513).
       PGRST_APP_SETTINGS_JWT_EXP: ${JWT_EXPIRY}
       PGRST_DB_POOL: ${PGRST_DB_POOL:-15}
       PGRST_DB_POOL_ACQUISITION_TIMEOUT: ${PGRST_DB_POOL_TIMEOUT:-10}
@@ -1047,7 +1613,7 @@ services:
   realtime:
     # This container name looks inconsistent but is correct because realtime constructs tenant id by parsing the subdomain
     container_name: realtime-dev.${CONTAINER_PREFIX}-realtime
-    image: supabase/realtime:v2.76.5
+    image: supabase/realtime:v2.134.10
     restart: unless-stopped
     depends_on:
       db:
@@ -1076,11 +1642,11 @@ services:
       DB_ENC_KEY: ${REALTIME_DB_ENC_KEY}
       API_JWT_SECRET: ${JWT_SECRET}
       SECRET_KEY_BASE: ${SECRET_KEY_BASE}
+      METRICS_JWT_SECRET: ${JWT_SECRET}
       ERL_AFLAGS: -proto_dist inet_tcp
       DNS_NODES: "''"
       RLIMIT_NOFILE: "10000"
       APP_NAME: realtime
-      REGION: us-east-1
       SEED_SELF_HOST: "true"
       RUN_JANITOR: "true"
       # Realtime scaling
@@ -1098,7 +1664,7 @@ services:
   # To use S3 backed storage: docker compose -f docker-compose.yml -f docker-compose.s3.yml up
   storage:
     container_name: ${CONTAINER_PREFIX}-storage
-    image: supabase/storage-api:v1.48.26
+    image: supabase/storage-api:v1.74.0
     restart: unless-stopped
     volumes:
       - ../files/volumes/storage:/var/lib/storage:z
@@ -1115,6 +1681,7 @@ services:
       timeout: 5s
       interval: 5s
       retries: 3
+      start_period: 10s
     depends_on:
       db:
         # Disable this if you are using an external Postgres database
@@ -1127,18 +1694,23 @@ services:
       ANON_KEY: ${ANON_KEY}
       SERVICE_KEY: ${SERVICE_ROLE_KEY}
       POSTGREST_URL: http://rest:3000
-      PGRST_JWT_SECRET: ${JWT_SECRET}
+      AUTH_JWT_SECRET: ${JWT_SECRET}
       DATABASE_URL: postgres://supabase_storage_admin:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
+      STORAGE_PUBLIC_URL: ${SUPABASE_PUBLIC_URL}
+      REQUEST_ALLOW_X_FORWARDED_PATH: "true"
       FILE_SIZE_LIMIT: ${FILE_SIZE_LIMIT:-52428800}
       STORAGE_BACKEND: file
       FILE_STORAGE_BACKEND_PATH: /var/lib/storage
-      TENANT_ID: stub
+      # Bucket name when using an S3 backend, directory name when using 'file'
+      GLOBAL_S3_BUCKET: ${GLOBAL_S3_BUCKET:-stub}
+      TENANT_ID: ${STORAGE_TENANT_ID:-stub}
       # TODO: https://github.com/supabase/storage-api/issues/55
-      REGION: stub
-      GLOBAL_S3_BUCKET: stub
+      REGION: ${REGION:-stub}
       ENABLE_IMAGE_TRANSFORMATION: "true"
       IMGPROXY_URL: http://imgproxy:5001
-      REQUEST_ALLOW_X_FORWARDED_PATH: "true"
+      # Credentials for the S3-compatible endpoint at /storage/v1/s3
+      S3_PROTOCOL_ACCESS_KEY_ID: ${S3_PROTOCOL_ACCESS_KEY_ID}
+      S3_PROTOCOL_ACCESS_KEY_SECRET: ${S3_PROTOCOL_ACCESS_KEY_SECRET}
     logging:
       driver: json-file
       options:
@@ -1147,7 +1719,7 @@ services:
 
   imgproxy:
     container_name: ${CONTAINER_PREFIX}-imgproxy
-    image: darthsim/imgproxy:v3.30.1
+    image: darthsim/imgproxy:v3.31.4
     restart: unless-stopped
     volumes:
       - ../files/volumes/storage:/var/lib/storage:z
@@ -1165,7 +1737,7 @@ services:
       IMGPROXY_BIND: ":5001"
       IMGPROXY_LOCAL_FILESYSTEM_ROOT: /
       IMGPROXY_USE_ETAG: "true"
-      IMGPROXY_ENABLE_WEBP_DETECTION: ${IMGPROXY_ENABLE_WEBP_DETECTION}
+      IMGPROXY_AUTO_WEBP: ${IMGPROXY_AUTO_WEBP:-true}
       IMGPROXY_MAX_SRC_RESOLUTION: "16.8"
     logging:
       driver: json-file
@@ -1175,7 +1747,7 @@ services:
 
   meta:
     container_name: ${CONTAINER_PREFIX}-meta
-    image: supabase/postgres-meta:v0.96.3
+    image: supabase/postgres-meta:v0.99.0
     restart: unless-stopped
     depends_on:
       db:
@@ -1188,7 +1760,8 @@ services:
       PG_META_DB_HOST: ${POSTGRES_HOST}
       PG_META_DB_PORT: ${POSTGRES_PORT}
       PG_META_DB_NAME: ${POSTGRES_DB}
-      PG_META_DB_USER: supabase_admin
+      # See POSTGRES_USER_READ_WRITE on the studio service
+      PG_META_DB_USER: ${STUDIO_DB_USER:-postgres}
       PG_META_DB_PASSWORD: ${POSTGRES_PASSWORD}
       CRYPTO_KEY: ${PG_META_CRYPTO_KEY}
     logging:
@@ -1199,7 +1772,7 @@ services:
 
   analytics:
     container_name: ${CONTAINER_PREFIX}-analytics
-    image: supabase/logflare:1.36.1
+    image: supabase/logflare:1.50.10
     restart: unless-stopped
     # ports:
     #   - 4000:4000
@@ -1208,13 +1781,13 @@ services:
     healthcheck:
       test:
         [
-          "CMD",
-          "curl",
-          "http://localhost:4000/health"
+          "CMD-SHELL",
+          "curl -sSfL -o /dev/null http://localhost:4000/health"
         ]
       timeout: 5s
       interval: 5s
       retries: 10
+      start_period: 30s
     depends_on:
       db:
         # Disable this if you are using an external Postgres database
@@ -1247,7 +1820,7 @@ services:
   # (unlike named volumes which auto-copy on first use).
   db-init:
     container_name: ${CONTAINER_PREFIX}-db-init
-    image: supabase/postgres:17.6.1.084
+    image: supabase/postgres:17.6.1.136
     restart: "no"
     volumes:
       - ../files/volumes/db/config:/mnt/db-config:Z
@@ -1291,7 +1864,7 @@ services:
   # Comment out everything below this point if you are using an external Postgres database
   db:
     container_name: ${CONTAINER_PREFIX}-db
-    image: supabase/postgres:17.6.1.084
+    image: supabase/postgres:17.6.1.136
     restart: unless-stopped
     shm_size: ${PG_SHM_SIZE:-2g}
     ports:
@@ -1345,7 +1918,6 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       PGDATABASE: ${POSTGRES_DB}
       POSTGRES_DB: ${POSTGRES_DB}
-      JWT_SECRET: ${JWT_SECRET}
       JWT_EXP: ${JWT_EXPIRY}
     command: [
         "postgres",
@@ -1411,6 +1983,39 @@ services:
         max-size: ${LOG_MAX_SIZE:-10m}
         max-file: ${LOG_MAX_FILE:-3}
 
+  # One-shot migration: databases initialised by older versions of this template
+  # have the JWT signing secret stored as the database setting
+  # app.settings.jwt_secret, readable by every role (supabase/supabase#43513).
+  # This removes it. Safe to run on every deploy — a no-op once it is gone.
+  db-jwt-reset:
+    container_name: ${CONTAINER_PREFIX}-db-jwt-reset
+    image: supabase/postgres:17.6.1.136
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGHOST: ${POSTGRES_HOST}
+      PGPORT: ${POSTGRES_PORT}
+      # supabase_admin is the image superuser; `postgres` may not reset custom GUCs
+      PGUSER: supabase_admin
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: ${POSTGRES_DB}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        psql -v ON_ERROR_STOP=1 -tA <<'SQL'
+        ALTER DATABASE postgres RESET "app.settings.jwt_secret";
+        ALTER DATABASE :"DBNAME" RESET "app.settings.jwt_secret";
+        SELECT CASE
+          WHEN EXISTS (SELECT 1 FROM pg_db_role_setting, unnest(setconfig) AS c
+                       WHERE c LIKE 'app.settings.jwt_secret=%')
+          THEN 'ERROR: app.settings.jwt_secret is still set'
+          ELSE 'OK: app.settings.jwt_secret is not stored in the database'
+        END;
+        SQL
+
   vector:
     container_name: ${CONTAINER_PREFIX}-vector
     image: timberio/vector:0.53.0-alpine
@@ -1448,143 +2053,67 @@ services:
         max-size: ${LOG_MAX_SIZE:-10m}
         max-file: ${LOG_MAX_FILE:-3}
 
+  # One-shot init: seeds the edge functions bind mount on first deploy with the
+  # upstream main worker (JWT verification, hybrid HS256/ES256), the shared
+  # deno.jsonc import map and a hello example. Existing files are never touched.
   functions-init:
     container_name: ${CONTAINER_PREFIX}-functions-init
     image: alpine:3.19
     restart: "no"
     volumes:
       - ../files/volumes/functions:/home/deno/functions:Z
+    configs:
+      - source: functions_main_index
+        target: /seed/main/index.ts
+      - source: functions_deno_jsonc
+        target: /seed/deno.jsonc
+      - source: functions_hello_index
+        target: /seed/hello/index.ts
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
-        if [ ! -f /home/deno/functions/main/index.ts ]; then
-          echo "First run: creating edge functions entrypoint..."
-          mkdir -p /home/deno/functions/main
-          mkdir -p /home/deno/functions/hello
-          cat > /home/deno/functions/main/index.ts << 'ENDOFFILE'
-        import * as jose from 'https://deno.land/x/jose@v4.14.4/index.ts'
-
-        console.log('main function started')
-
-        const JWT_SECRET = Deno.env.get('JWT_SECRET')
-        const VERIFY_JWT = Deno.env.get('VERIFY_JWT') === 'true'
-
-        function getAuthToken(req: Request) {
-          const authHeader = req.headers.get('authorization')
-          if (!authHeader) {
-            throw new Error('Missing authorization header')
-          }
-          const [bearer, token] = authHeader.split(' ')
-          if (bearer !== 'Bearer') {
-            throw new Error(`Auth header is not 'Bearer {token}'`)
-          }
-          return token
-        }
-
-        async function verifyJWT(jwt: string): Promise<boolean> {
-          const encoder = new TextEncoder()
-          const secretKey = encoder.encode(JWT_SECRET)
-          try {
-            await jose.jwtVerify(jwt, secretKey)
-          } catch (err) {
-            console.error(err)
-            return false
-          }
-          return true
-        }
-
-        Deno.serve(async (req: Request) => {
-          if (req.method !== 'OPTIONS' && VERIFY_JWT) {
-            try {
-              const token = getAuthToken(req)
-              const isValidJWT = await verifyJWT(token)
-
-              if (!isValidJWT) {
-                return new Response(JSON.stringify({ msg: 'Invalid JWT' }), {
-                  status: 401,
-                  headers: { 'Content-Type': 'application/json' },
-                })
-              }
-            } catch (e) {
-              console.error(e)
-              return new Response(JSON.stringify({ msg: e.toString() }), {
-                status: 401,
-                headers: { 'Content-Type': 'application/json' },
-              })
-            }
-          }
-
-          const url = new URL(req.url)
-          const { pathname } = url
-          const path_parts = pathname.split('/')
-          const service_name = path_parts[1]
-
-          if (!service_name || service_name === '') {
-            const error = { msg: 'missing function name in request' }
-            return new Response(JSON.stringify(error), {
-              status: 400,
-              headers: { 'Content-Type': 'application/json' },
-            })
-          }
-
-          const servicePath = `/home/deno/functions/$${service_name}`
-          console.error(`serving the request with $${servicePath}`)
-
-          const memoryLimitMb = parseInt(Deno.env.get('FUNCTIONS_WORKER_MEMORY_MB') || '512')
-          const workerTimeoutMs = parseInt(Deno.env.get('FUNCTIONS_WORKER_TIMEOUT_MS') || '300000')
-          const noModuleCache = false
-          const importMapPath = null
-          const envVarsObj = Deno.env.toObject()
-          const envVars = Object.keys(envVarsObj).map((k) => [k, envVarsObj[k]])
-
-          try {
-            const worker = await EdgeRuntime.userWorkers.create({
-              servicePath,
-              memoryLimitMb,
-              workerTimeoutMs,
-              noModuleCache,
-              importMapPath,
-              envVars,
-            })
-            return await worker.fetch(req)
-          } catch (e) {
-            const error = { msg: e.toString() }
-            return new Response(JSON.stringify(error), {
-              status: 500,
-              headers: { 'Content-Type': 'application/json' },
-            })
-          }
-        })
-        ENDOFFILE
-          cat > /home/deno/functions/hello/index.ts << 'ENDOFFILE'
-        Deno.serve(async () => {
-          return new Response(
-            `"Hello from Edge Functions!"`,
-            { headers: { "Content-Type": "application/json" } },
-          )
-        })
-        ENDOFFILE
-          echo "Done."
-        else
-          echo "Functions directory already populated, skipping."
-        fi
+        set -e
+        for f in main/index.ts deno.jsonc hello/index.ts; do
+          if [ ! -f "/home/deno/functions/$$f" ]; then
+            echo "Seeding /home/deno/functions/$$f"
+            mkdir -p "$$(dirname "/home/deno/functions/$$f")"
+            cp "/seed/$$f" "/home/deno/functions/$$f"
+          else
+            echo "/home/deno/functions/$$f already exists, skipping."
+          fi
+        done
+        echo "Done."
 
   functions:
     container_name: ${CONTAINER_PREFIX}-functions
-    image: supabase/edge-runtime:v1.71.2
+    image: supabase/edge-runtime:v1.76.2
     restart: unless-stopped
     volumes:
       - ../files/volumes/functions:/home/deno/functions:Z
+      - deno-cache:/root/.cache/deno
     depends_on:
       analytics:
         condition: service_healthy
+      kong:
+        condition: service_healthy
       functions-init:
         condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 1 bash -c '</dev/tcp/127.0.0.1/9000'"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
     environment:
+      # Legacy symmetric HS256 key
       JWT_SECRET: ${JWT_SECRET}
       SUPABASE_URL: http://kong:8000
+      SUPABASE_PUBLIC_URL: ${SUPABASE_PUBLIC_URL}
+      # Legacy API keys (HS256-signed JWTs)
       SUPABASE_ANON_KEY: ${ANON_KEY}
       SUPABASE_SERVICE_ROLE_KEY: ${SERVICE_ROLE_KEY}
+      # New opaque API keys (optional)
+      SUPABASE_PUBLISHABLE_KEYS: "{\"default\":\"${SUPABASE_PUBLISHABLE_KEY:-}\"}"
+      SUPABASE_SECRET_KEYS: "{\"default\":\"${SUPABASE_SECRET_KEY:-}\"}"
       SUPABASE_DB_URL: postgresql://postgres.${POOLER_TENANT_ID}:${POSTGRES_PASSWORD}@supavisor:6543/${POSTGRES_DB}
       VERIFY_JWT: "${FUNCTIONS_VERIFY_JWT}"
       FUNCTIONS_WORKER_MEMORY_MB: "${FUNCTIONS_WORKER_MEMORY_MB:-512}"
@@ -1599,7 +2128,7 @@ services:
   # Update the DATABASE_URL if you are using an external Postgres database
   supavisor:
     container_name: ${CONTAINER_PREFIX}-pooler
-    image: supabase/supavisor:2.7.4
+    image: supabase/supavisor:2.9.12
     restart: unless-stopped
     ports:
       - ${POOLER_SESSION_PORT:-5432}:5432
@@ -1623,7 +2152,8 @@ services:
         ]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 10
+      start_period: 30s
     depends_on:
       db:
         condition: service_healthy
@@ -1632,9 +2162,10 @@ services:
     environment:
       PORT: 4000
       POSTGRES_PORT: ${POSTGRES_PORT}
+      POSTGRES_HOST: ${POSTGRES_HOST}
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      DATABASE_URL: ecto://supabase_admin:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT}/_supabase
+      DATABASE_URL: ecto://supabase_admin:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/_supabase
       CLUSTER_POSTGRES: true
       SECRET_KEY_BASE: ${SECRET_KEY_BASE}
       VAULT_ENC_KEY: ${VAULT_ENC_KEY}
@@ -1664,6 +2195,10 @@ services:
       options:
         max-size: ${LOG_MAX_SIZE:-10m}
         max-file: ${LOG_MAX_FILE:-3}
+
+volumes:
+  # Deno module cache for edge functions (avoids re-downloading dependencies)
+  deno-cache:
 
 networks:
   dokploy-network:
