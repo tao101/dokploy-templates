@@ -17,6 +17,8 @@ This guide walks you through deploying a self-hosted Supabase instance on Dokplo
 
 If unsure, start with **Standard**. You can switch later by replacing the compose and env files.
 
+Already running an older version of these templates? Use [`UPGRADE-GUIDE.md`](UPGRADE-GUIDE.md) instead of this guide.
+
 ---
 
 ## Step 1: Generate Secrets
@@ -42,8 +44,12 @@ openssl rand -base64 24
 # Generate PG_META_CRYPTO_KEY (32 chars)
 openssl rand -base64 24
 
-# Generate LOGFLARE tokens (use same value for all three)
-openssl rand -base64 24
+# Generate S3_PROTOCOL_ACCESS_KEY_ID and S3_PROTOCOL_ACCESS_KEY_SECRET (Storage S3 endpoint)
+openssl rand -hex 16
+openssl rand -hex 32
+
+# Generate LOGFLARE_PUBLIC_ACCESS_TOKEN and LOGFLARE_PRIVATE_ACCESS_TOKEN (one value each)
+openssl rand -hex 16
 
 # Generate REALTIME_DB_ENC_KEY (exactly 16 hex chars — optimized variant only)
 openssl rand -hex 8
@@ -128,8 +134,9 @@ Sign both with HS256 using your `JWT_SECRET`. You can use [jwt.io](https://jwt.i
 | `SECRET_KEY_BASE` | Your generated 64-char hex string |
 | `VAULT_ENC_KEY` | Your generated 32-char string |
 | `PG_META_CRYPTO_KEY` | Your generated 32-char string |
-| `LOGFLARE_PUBLIC_ACCESS_TOKEN` | Your generated token |
-| `LOGFLARE_PRIVATE_ACCESS_TOKEN` | Same as above (for self-hosted) |
+| `S3_PROTOCOL_ACCESS_KEY_ID` / `S3_PROTOCOL_ACCESS_KEY_SECRET` | Your generated hex strings |
+| `LOGFLARE_PUBLIC_ACCESS_TOKEN` | Your generated token (Vector -> Logflare) |
+| `LOGFLARE_PRIVATE_ACCESS_TOKEN` | Your generated token (Studio -> Logflare) |
 | `POOLER_TENANT_ID` | A unique identifier like `myproject-prod` |
 
 ### Domain Variables (set now or update after Step 6)
@@ -137,8 +144,8 @@ Sign both with HS256 using your `JWT_SECRET`. You can use [jwt.io](https://jwt.i
 | Variable | Example |
 |----------|---------|
 | `SUPABASE_HOST` | `supabase.yourdomain.com` |
-| `API_EXTERNAL_URL` | `https://supabase.yourdomain.com` |
 | `SUPABASE_PUBLIC_URL` | `https://supabase.yourdomain.com` |
+| `API_EXTERNAL_URL` | `https://supabase.yourdomain.com/auth/v1` (note the `/auth/v1` suffix) |
 | `SITE_URL` | `https://yourapp.com` (your frontend app URL) |
 | `ADDITIONAL_REDIRECT_URLS` | `https://supabase.yourdomain.com/*,https://yourapp.com/*` |
 
@@ -162,9 +169,9 @@ If using the optimized variant, also review these (defaults are tuned for 16 vCP
 ## Step 5: Deploy
 
 1. Click **Deploy** in Dokploy
-2. Watch the logs — all 12 containers need to start and pass health checks
+2. Watch the logs — all 13 long-running containers need to start and pass health checks. Three one-shot jobs (`db-init`, `db-jwt-reset`, `functions-init`) run and exit with code 0; that is expected.
 3. This typically takes 1-3 minutes for all services to become healthy
-4. The startup order is: vector > db > analytics > (auth, rest, meta, realtime, storage, imgproxy, kong, studio, supavisor)
+4. The startup order is: vector > db-init > db > db-jwt-reset / analytics > (auth, rest, meta, realtime, storage, imgproxy, kong, studio, supavisor, functions)
 
 If any container keeps restarting, check its logs in the Dokploy UI. Common issues:
 - **db**: Wrong `POSTGRES_PASSWORD` or corrupted data directory
@@ -201,7 +208,7 @@ Update these env vars to match your domain, then **redeploy**:
 
 ```env
 SUPABASE_HOST=supabase.yourdomain.com
-API_EXTERNAL_URL=https://supabase.yourdomain.com
+API_EXTERNAL_URL=https://supabase.yourdomain.com/auth/v1
 SUPABASE_PUBLIC_URL=https://supabase.yourdomain.com
 ADDITIONAL_REDIRECT_URLS=https://supabase.yourdomain.com/*,https://yourapp.com/*
 ```
@@ -218,7 +225,7 @@ SSH into your server and run:
 docker ps --format "table {{.Names}}\t{{.Status}}" | grep supabase
 ```
 
-All 12 containers should show `(healthy)`.
+All 13 long-running containers should show `(healthy)`. The `db-jwt-reset` job log should end with `OK: app.settings.jwt_secret is not stored in the database`.
 
 ### Test direct database access
 
@@ -241,7 +248,8 @@ Open `https://supabase.yourdomain.com` in your browser. Log in with your `DASHBO
 ### Test the API
 
 ```bash
-curl -s https://supabase.yourdomain.com/rest/v1/ \
+# The OpenAPI root (/rest/v1/) is service-role only; use a table path with the anon key
+curl -s "https://supabase.yourdomain.com/rest/v1/your_table?select=*" \
   -H "apikey: YOUR_ANON_KEY" \
   -H "Authorization: Bearer YOUR_ANON_KEY"
 ```
@@ -336,7 +344,9 @@ For production on dedicated servers, run [`../SERVER-SETUP.md`](../SERVER-SETUP.
 | Pooler connection refused | Ensure `POOLER_TENANT_ID` is not still `your-tenant-id`; check supavisor logs |
 | Auth emails not sending | Configure real SMTP credentials (defaults use a fake mail server) |
 | "too many connections" | Check connection usage with `SELECT usename, count(*) FROM pg_stat_activity GROUP BY usename;` |
-| PostgREST fails on startup | Ensure all schemas in `PGRST_DB_SCHEMAS` exist (`public,storage,graphql_public`) |
+| PostgREST fails on startup | Ensure all schemas in `PGRST_DB_SCHEMAS` exist (`public,graphql_public`) |
+| GraphQL says `pg_graphql extension is not enabled` | Run `create extension pg_graphql;` (not installed by default on fresh PG 17.6.1.136 databases) |
+| Upgrading an existing deployment | Follow [`UPGRADE-GUIDE.md`](UPGRADE-GUIDE.md) (backup, env changes, JWT secret cleanup, verification, rollback) |
 | Kong startup error | Usually a config quoting issue — check kong logs for YAML parse errors |
 
 For detailed configuration reference and architecture diagrams, see [`README.md`](README.md).

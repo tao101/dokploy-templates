@@ -8,7 +8,7 @@ Every template is **fully standalone** — config files are embedded inline in t
 
 | Directory | What it deploys | Docs |
 |---|---|---|
-| [`supabase/`](supabase/) | Self-hosted Supabase (12 services: Postgres, Kong, Auth, REST, Realtime, Storage, Studio, etc.) — standard and optimized (Hetzner CCX33) variants | [README](supabase/README.md) · [Deploy Guide](supabase/DEPLOY-GUIDE.md) |
+| [`supabase/`](supabase/) | Self-hosted Supabase (13 services: Postgres, Kong, Auth, REST, Realtime, Storage, Edge Functions, Studio, etc.) — standard and optimized (Hetzner CCX33) variants | [README](supabase/README.md) · [Deploy Guide](supabase/DEPLOY-GUIDE.md) · [Upgrade Guide](supabase/UPGRADE-GUIDE.md) |
 | [`trigger/`](trigger/) | Trigger.dev webapp + worker on separate servers (all-in-one compose per server) | [Deploy Guide](trigger/DEPLOY-GUIDE.md) |
 | [`trigger-external-dbs/`](trigger-external-dbs/) | Trigger.dev with a dedicated DB server — databases on a remote, webapp as a Swarm stack, workers on separate remotes | [Deploy Guide](trigger-external-dbs/DEPLOY-GUIDE.md) |
 
@@ -40,6 +40,7 @@ Every template is **fully standalone** — config files are embedded inline in t
 ├── supabase/
 │   ├── README.md                            # Full Supabase guide
 │   ├── DEPLOY-GUIDE.md                      # Step-by-step deployment
+│   ├── UPGRADE-GUIDE.md                     # In-place upgrade of existing deployments
 │   ├── kernel-tuning-notes.md               # Optional host tuning
 │   ├── supabase-docker-compose.yml          # Standard deployment
 │   ├── supabase.env                         # Standard env template
