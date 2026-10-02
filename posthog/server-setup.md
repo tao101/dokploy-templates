@@ -19,7 +19,7 @@ Two things about the CX43 shape the whole configuration and are worth internalis
 **16 GB is PostHog's stated floor, not comfortable headroom.** PostHog's own requirement is
 "4 vCPU, 16 GB RAM, more than 30 GB storage", and their installer prints *"You REALLY need 8GB or
 more of memory to run this stack"*. The stack is ~35 containers: ClickHouse, PostgreSQL, Redpanda,
-ZooKeeper, Redis, Valkey, Temporal, MinIO, SeaweedFS, headless Chromium, three Django processes,
+ZooKeeper, Redis, Valkey, Temporal, two SeaweedFS stores, headless Chromium, three Django processes,
 seven Node consumers and eleven Rust/Go services. With this template's limits, steady state is
 about **12 GB of the 16 GB**. That is workable, and it is why sections 1 and 2 below exist.
 
@@ -104,7 +104,7 @@ spikes with THP on; `../SERVER-SETUP.md` section 4 disables it.
 | Docker images | ~15 GB | Over half is `posthog/posthog`: 7.3 GB unpacked (~2.7 GB over the wire), pulled once and shared by 4 services |
 | ClickHouse (`clickhouse-data`) | grows forever | events, persons, session metadata — **the one to watch** |
 | SeaweedFS (`seaweedfs-data`) | grows forever | session replay snapshot blobs, the fastest grower per event |
-| MinIO (`objectstorage-data`) | small | exports and AI blobs |
+| SeaweedFS (`objectstorage-seaweedfs-data`) | small | exports and AI blobs |
 | PostgreSQL (`postgres-data`) | 2–10 GB | app metadata, flags, insights, Temporal |
 | Redpanda (`redpanda-data`) | ≤ ~30 GB worst case | bounded by `KAFKA_RETENTION_*` in the env file |
 | System + Dokploy + Traefik | ~5 GB | |
@@ -137,7 +137,7 @@ df -h /
 ## 4. Firewall
 
 `../SERVER-SETUP.md` section 12 sets up UFW. For a PostHog remote server, the open set is small —
-**no database, ClickHouse, Kafka or MinIO port is published to the host by this template**, so
+**no database, ClickHouse, Kafka or object storage port is published to the host by this template**, so
 there is nothing extra to allow:
 
 ```bash

@@ -2,6 +2,18 @@
 
 Deploy Trigger.dev v4.5.8 with a separate webapp server and worker server(s) using Dokploy.
 
+## MinIO Image Change (September 2026)
+
+MinIO removed its images from Docker Hub and Quay in September 2026. The `bitnamilegacy/minio`
+image this template used still pulls, but it has had no updates or security fixes since
+mid-2025. The `minio` service now runs `pgsty/minio`, a maintained community fork with the same
+environment variables and on-disk format. A new one-shot `minio-init` service (`pgsty/mc`)
+creates the `packets` bucket, a job the Bitnami image did through `MINIO_DEFAULT_BUCKETS`.
+
+For an existing deployment, paste the new compose and redeploy. No env changes are needed. The
+`minio-data` volume is reused as-is (only its mount path inside the container changed), so
+stored packets survive.
+
 ## Upgrade an Existing v4.5.1 Deployment to v4.5.8
 
 These templates pin both the webapp and supervisor images to `v4.5.8`. Review the

@@ -13,7 +13,7 @@
 #   - Caddy terminates plain HTTP on :80 behind Traefik instead of owning 80/443 + ACME
 #   - elasticsearch / temporal-ui / temporal-admin-tools / asyncmigrationscheck dropped
 #   - capture-ai added (upstream hobby routes /i/v0/ai to a service it never defines)
-#   - Postgres and MinIO credentials are generated, not the published `posthog:posthog` defaults
+#   - Postgres and object storage credentials are generated, not the published `posthog:posthog` defaults
 #   - explicit memory limits on every service, and ClickHouse / Redpanda / Postgres / Celery /
 #     Nginx Unit / Node heaps sized for 16 GB instead of a 64 GB+ machine
 #
@@ -1710,24 +1710,51 @@ services:
           memory: 256M
     logging: *default-logging
 
-  # S3-compatible store for exports, AI blobs and the DuckLake staging bucket.
+  # S3-compatible store for exports and AI blobs. SeaweedFS on the same objectstorage:19000
+  # endpoint MinIO used to serve, as upstream hobby does since MinIO pulled its images from
+  # Docker Hub and Quay. The background loop registers the one S3 identity (the generated
+  # MINIO_ROOT_* pair, names kept so existing env files still work) and the buckets, then
+  # touches the sentinel the healthcheck waits for. No `anonymous` identity on purpose:
+  # Caddy proxies /posthog/* straight here, so only signed and presigned requests get in.
   objectstorage:
-    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    image: chrislusf/seaweedfs:4.29
     container_name: ${CONTAINER_PREFIX}-objectstorage
     restart: unless-stopped
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        # /tmp outlives a container restart, so drop the old sentinel before weed is back up.
+        rm -f /tmp/objectstorage-ready
+        (
+            while true; do
+                printf 's3.configure -access_key=%s -secret_key=%s -user=posthog -actions=Admin -apply\ns3.bucket.create -name posthog\ns3.bucket.create -name ai-blobs\n' "$$OBJECTSTORAGE_ACCESS_KEY" "$$OBJECTSTORAGE_SECRET_KEY" \
+                        | /usr/bin/weed shell -master=localhost:19001 >/dev/null 2>&1 || true
+                if echo 's3.bucket.list' | /usr/bin/weed shell -master=localhost:19001 2>/dev/null | grep -q ai-blobs \
+                        && echo 's3.configure' | /usr/bin/weed shell -master=localhost:19001 2>/dev/null | grep -qF -- "$$OBJECTSTORAGE_ACCESS_KEY"; then
+                    touch /tmp/objectstorage-ready
+                    echo "Objectstorage SeaweedFS ready with required buckets and identities"
+                    break
+                fi
+                sleep 1
+            done
+        ) &
+        exec /usr/bin/weed "$$@"
+      - --
     environment:
-      MINIO_ROOT_USER: "${MINIO_ROOT_USER}"
-      MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD}"
-    entrypoint: sh
-    command: -c 'mkdir -p /data/posthog /data/ducklake-dev /data/ai-blobs && minio server --address ":19000" --console-address ":19001" /data'
+      OBJECTSTORAGE_ACCESS_KEY: "${MINIO_ROOT_USER}"
+      OBJECTSTORAGE_SECRET_KEY: "${MINIO_ROOT_PASSWORD}"
+    command: ["server", "-master.port=19001", "-s3", "-s3.port=19000", "-dir=/data", "-volume.max=1000", "-master.volumePreallocate=false"]
     volumes:
-      - objectstorage-data:/data
+      # A new volume: SeaweedFS cannot read MinIO's layout. The old objects stay on the
+      # orphaned `objectstorage-data` volume; see DEPLOY-GUIDE.md "Moving off MinIO".
+      - objectstorage-seaweedfs-data:/data
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:19000/minio/health/live || exit 1"]
-      interval: 10s
+      test: ["CMD", "test", "-f", "/tmp/objectstorage-ready"]
+      interval: 5s
       timeout: 5s
-      retries: 10
-      start_period: 20s
+      retries: 30
+      start_period: 10s
     deploy:
       resources:
         limits:
@@ -2487,7 +2514,7 @@ volumes:
   zookeeper-datalog:
   zookeeper-logs:
   redpanda-data:
-  objectstorage-data:
+  objectstorage-seaweedfs-data:
   seaweedfs-data:
   posthog-assets:
   posthog-share:
