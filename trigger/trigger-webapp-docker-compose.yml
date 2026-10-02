@@ -4,7 +4,7 @@
 # All configurations are self-contained — no external file mounts needed.
 #
 # Services: trigger (web app), postgres, redis, electric, clickhouse,
-#           registry, minio, postgres-backup, redis-backup
+#           registry, minio, minio-init, postgres-backup, redis-backup
 #
 # Domain Setup (after deploy):
 #   1. In Dokploy UI, add domain for trigger service -> port 3000 (HTTPS)
@@ -34,6 +34,8 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
       registry:
         condition: service_healthy
     user: root
@@ -401,17 +403,22 @@ services:
         max-size: "50m"
         max-file: "5"
 
+  # MinIO pulled its images from Docker Hub and Quay in September 2026, and the
+  # bitnamilegacy build is frozen at mid-2025 with no security fixes. pgsty/minio is the
+  # maintained community fork: same env vars, same on-disk format, so the existing
+  # minio-data volume (written by bitnamilegacy/minio) is read as-is.
   minio:
-    image: bitnamilegacy/minio:latest
+    image: pgsty/minio:RELEASE.2026-08-04T00-00-00Z
     container_name: ${CONTAINER_PREFIX}-minio
     restart: unless-stopped
+    command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-admin}
       MINIO_ROOT_PASSWORD: "${MINIO_PASSWORD}"
-      MINIO_DEFAULT_BUCKETS: packets
       MINIO_BROWSER: "on"
     volumes:
-      - "minio-data:/bitnami/minio/data"
+      # Same volume the bitnami image mounted at /bitnami/minio/data; only the path changed.
+      - "minio-data:/data"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 5s
@@ -423,6 +430,24 @@ services:
       options:
         max-size: "50m"
         max-file: "5"
+
+  # Creates the packets bucket (bitnami did this through MINIO_DEFAULT_BUCKETS).
+  minio-init:
+    image: pgsty/mc:RELEASE.2026-09-16T00-00-00Z
+    container_name: ${CONTAINER_PREFIX}-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    restart: "no"
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        mc alias set myminio http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}"
+        mc mb --ignore-existing myminio/packets
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-admin}
+      MINIO_ROOT_PASSWORD: "${MINIO_PASSWORD}"
 
 volumes:
   postgres-data:

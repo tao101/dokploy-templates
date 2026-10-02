@@ -204,5 +204,5 @@ Anything written between the backup and the rollback (new users, uploads) is los
 | `/realtime/v1/api/tenants/...` returns 403 | Intended: blocked at the gateway (upstream security fix). Websocket subscriptions are unaffected. |
 | Users logged out after step 6 | Expected after rotating `JWT_SECRET`. |
 | Realtime crash-loops with `could not fetch environment variable "METRICS_JWT_SECRET"` | Realtime v2.9x+ requires it. The templates set it; a hand-written compose from before 2026-03 may not. Add `METRICS_JWT_SECRET: ${JWT_SECRET}` to the realtime service. |
-| Deploy fails with `pull access denied for minio/mc` (S3/MinIO variants only) | Docker Hub no longer serves the untagged `minio/mc` image. Pin it, e.g. `quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z`. |
+| Deploy fails with `pull access denied for minio/mc` or `minio/minio` (S3/MinIO variants only) | MinIO removed `minio/minio` and `minio/mc` from Docker Hub and Quay in September 2026. Use the maintained fork, `pgsty/minio:RELEASE.2026-08-04T00-00-00Z` and `pgsty/mc:RELEASE.2026-09-16T00-00-00Z`. It reads existing MinIO volumes as-is. |
 | Vector logs `dns error ... Name does not resolve` or Realtime logs `PromEx ... ETS table` in the first 20 seconds | Boot-time races while Logflare and the Realtime tenant come up. They stop on their own; only investigate if they persist. |
