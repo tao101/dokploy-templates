@@ -1728,10 +1728,10 @@ services:
         rm -f /tmp/objectstorage-ready
         (
             while true; do
-                printf 's3.configure -access_key=${MINIO_ROOT_USER} -secret_key=${MINIO_ROOT_PASSWORD} -user=posthog -actions=Admin -apply\ns3.bucket.create -name posthog\ns3.bucket.create -name ai-blobs\n' \
+                printf 's3.configure -access_key=%s -secret_key=%s -user=posthog -actions=Admin -apply\ns3.bucket.create -name posthog\ns3.bucket.create -name ai-blobs\n' "$$OBJECTSTORAGE_ACCESS_KEY" "$$OBJECTSTORAGE_SECRET_KEY" \
                         | /usr/bin/weed shell -master=localhost:19001 >/dev/null 2>&1 || true
                 if echo 's3.bucket.list' | /usr/bin/weed shell -master=localhost:19001 2>/dev/null | grep -q ai-blobs \
-                        && echo 's3.configure' | /usr/bin/weed shell -master=localhost:19001 2>/dev/null | grep -q '${MINIO_ROOT_USER}'; then
+                        && echo 's3.configure' | /usr/bin/weed shell -master=localhost:19001 2>/dev/null | grep -qF -- "$$OBJECTSTORAGE_ACCESS_KEY"; then
                     touch /tmp/objectstorage-ready
                     echo "Objectstorage SeaweedFS ready with required buckets and identities"
                     break
@@ -1741,6 +1741,9 @@ services:
         ) &
         exec /usr/bin/weed "$$@"
       - --
+    environment:
+      OBJECTSTORAGE_ACCESS_KEY: "${MINIO_ROOT_USER}"
+      OBJECTSTORAGE_SECRET_KEY: "${MINIO_ROOT_PASSWORD}"
     command: ["server", "-master.port=19001", "-s3", "-s3.port=19000", "-dir=/data", "-volume.max=1000", "-master.volumePreallocate=false"]
     volumes:
       # A new volume: SeaweedFS cannot read MinIO's layout. The old objects stay on the
