@@ -39,8 +39,10 @@ services:
       registry:
         condition: service_healthy
     user: root
+    # EMAIL_TRANSPORT and ALERT_EMAIL_TRANSPORT arrive as "" when email is not configured, and the
+    # webapp's env validation rejects an empty value, so they are dropped before it starts.
     command: |
-      sh -c "chown -R node:node /home/node/shared && exec ./scripts/entrypoint.sh"
+      sh -c "if [ $${#EMAIL_TRANSPORT} -eq 0 ]; then unset EMAIL_TRANSPORT ALERT_EMAIL_TRANSPORT; fi; chown -R node:node /home/node/shared && exec ./scripts/entrypoint.sh"
     expose:
       - "3000"
     networks:

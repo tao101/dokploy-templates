@@ -299,6 +299,13 @@ If you see connection errors, verify `TRIGGER_API_URL` and `TRIGGER_WORKER_TOKEN
 
 ### Email (Magic Link Login)
 
+Email is optional. With `EMAIL_TRANSPORT` unset the webapp starts normally and prints each magic
+link to its log instead of sending it:
+
+```bash
+docker logs <trigger-container> 2>&1 | grep -o 'https\?://[^ ]*/magic?[^ ]*' | tail -1
+```
+
 To enable email login, set these in the webapp env:
 
 ```
