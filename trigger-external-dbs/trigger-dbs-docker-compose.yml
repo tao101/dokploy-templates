@@ -124,7 +124,10 @@ services:
         max-file: "5"
 
   electric:
-    image: "electricsql/electric:1.4.4"
+    # Overridable because electricsql/electric vanished from Docker Hub on 2026-09-28
+    # (electric-sql/electric#4822). The env template sets ELECTRIC_IMAGE to Electric's interim
+    # repository; a deployment that leaves it unset keeps running the image it already has.
+    image: "${ELECTRIC_IMAGE:-electricsql/electric:1.4.4}"
     container_name: ${CONTAINER_PREFIX}-electric
     restart: unless-stopped
     depends_on:
