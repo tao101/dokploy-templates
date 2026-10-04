@@ -2,6 +2,37 @@
 
 Deploy Trigger.dev v4.5.8 with a separate webapp server and worker server(s) using Dokploy.
 
+## MinIO Image Change (September 2026)
+
+MinIO removed its images from Docker Hub and Quay in September 2026. The `bitnamilegacy/minio`
+image this template used still pulls, but it has had no updates or security fixes since
+mid-2025. The `minio` service now runs `pgsty/minio`, a maintained community fork with the same
+environment variables and on-disk format. A new one-shot `minio-init` service (`pgsty/mc`)
+creates the `packets` bucket, a job the Bitnami image did through `MINIO_DEFAULT_BUCKETS`.
+
+For an existing deployment, paste the new compose and redeploy. No env changes are needed. The
+`minio-data` volume is reused as-is (only its mount path inside the container changed), so
+stored packets survive.
+
+## ElectricSQL Image (September 2026)
+
+The `electricsql/electric` repository has been missing from Docker Hub since 2026-09-28
+([electric-sql/electric#4822](https://github.com/electric-sql/electric/issues/4822)), so the
+pinned `electricsql/electric:1.2.9` cannot be pulled by a server that does not already have it.
+Electric publishes to `electricsql/electric-temp` until Docker restores the original, and that
+repository only carries `1.8.1`.
+
+The compose reads the image from `ELECTRIC_IMAGE` and falls back to the old pin:
+
+- **New deployment:** `trigger-webapp.env` already sets
+  `ELECTRIC_IMAGE=electricsql/electric-temp:1.8.1`. Leave it in place.
+- **Existing deployment:** nothing to do. With `ELECTRIC_IMAGE` unset the compose keeps
+  `electricsql/electric:1.2.9`, which the server already has. If that image was removed
+  (`docker image prune`, a rebuilt server), add the line above to the env tab.
+
+Electric keeps no volume, so changing its version needs no migration. Delete the `ELECTRIC_IMAGE`
+line once `electricsql/electric` is back.
+
 ## Upgrade an Existing v4.5.1 Deployment to v4.5.8
 
 These templates pin both the webapp and supervisor images to `v4.5.8`. Review the
@@ -286,6 +317,13 @@ If you see connection errors, verify `TRIGGER_API_URL` and `TRIGGER_WORKER_TOKEN
 ## Step 8: Optional Configuration
 
 ### Email (Magic Link Login)
+
+Email is optional. With `EMAIL_TRANSPORT` unset the webapp starts normally and prints each magic
+link to its log instead of sending it:
+
+```bash
+docker logs <trigger-container> 2>&1 | grep -o 'https\?://[^ ]*/magic?[^ ]*' | tail -1
+```
 
 To enable email login, set these in the webapp env:
 

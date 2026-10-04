@@ -35,8 +35,8 @@ If those are all acceptable, continue.
 
 Traefik (installed by Dokploy on the remote server) terminates TLS and forwards plain HTTP to a
 Caddy container, which does PostHog's path-based routing across the split ingestion services.
-Everything else stays on the internal compose network — **no database, ClickHouse, Kafka, MinIO
-or SeaweedFS port is published to the host.**
+Everything else stays on the internal compose network — **no database, ClickHouse, Kafka
+or object storage port is published to the host.**
 
 ```
                        Internet
@@ -77,7 +77,7 @@ or SeaweedFS port is published to the host.**
                  │                                        │
    ┌─────────────┴────────────────────────────────────────┴───────────┐
    │  clickhouse + zookeeper │ postgres │ redis7 │ valkey │            │
-   │  minio │ seaweedfs │ temporal │ personhog-router/-replica         │
+   │  objectstorage + seaweedfs (SeaweedFS) │ temporal │ personhog-*   │
    └──────────────────────────────────────────────────────────────────┘
 
    worker (Celery)  ·  temporal-django-worker  ·  browserless (Chromium)
@@ -142,7 +142,7 @@ Paste each into the environment tab, replacing the placeholder.
 | `ENCRYPTION_SALT_KEYS` | **exactly 32 hex chars** | Every stored integration credential becomes unreadable — there is no recovery |
 | `BROWSERLESS_SECRET` | any | Image exports and heatmap screenshots fail until both sides match |
 | `POSTGRES_PASSWORD` | any | Nothing can reach the database until the volume's password is changed to match |
-| `MINIO_ROOT_PASSWORD` | any | Exports and AI blobs become unreadable |
+| `MINIO_ROOT_PASSWORD` | any | Exports and AI blobs become unreadable. The name is left over from MinIO; SeaweedFS uses it now |
 
 `ENCRYPTION_SALT_KEYS` **must** be exactly 32 hex characters — `openssl rand -hex 16`, not `-hex 32`.
 
@@ -159,7 +159,7 @@ Click **Deploy**. The first run is slow and mostly silent — this is expected:
 |---|---|---|
 | Image pull | 3–15 min | ~5 GB over the wire, ~18 GB unpacked; `posthog/posthog` alone unpacks to 7.3 GB |
 | `assets` | seconds | Copies ClickHouse UDF binaries, protobuf schemas and the GeoIP database out of the app image |
-| Data layer | 1–2 min | Postgres, ClickHouse, Redpanda, ZooKeeper, MinIO, SeaweedFS, Temporal come up in order |
+| Data layer | 1–2 min | Postgres, ClickHouse, Redpanda, ZooKeeper, both SeaweedFS stores, Temporal come up in order |
 | `kafka-init` | ~30 s | Creates the ingestion topics and sets Redpanda retention |
 | `web` migrations | **45–60 min** | Django + ClickHouse migrations, run once by the `web` container. Django alone is ~2,700 migrations applied single-threaded at ~35/min on a CX43 core |
 | Everything else | 1–2 min | Consumers and edge services start once `web` is up |
@@ -340,6 +340,37 @@ it: `docker manifest inspect ghcr.io/posthog/posthog/capture:sha-abc1234 >/dev/n
 The `assets` container re-runs on every deploy, so ClickHouse UDF binaries and protobuf schemas
 stay in step with the app image automatically.
 
+### Moving off MinIO (installs deployed before October 2026)
+
+MinIO removed its images from Docker Hub and Quay in September 2026, so the `objectstorage`
+service now runs SeaweedFS, as upstream hobby does. SeaweedFS cannot read MinIO's on-disk format,
+so it starts on a new volume, `objectstorage-seaweedfs-data`. Your old exports and AI blobs stay on
+the orphaned `<project>_objectstorage-data` volume. Nothing deletes it.
+
+Redeploying is enough to get a working stack. New exports and AI blobs land in SeaweedFS. To keep
+the old objects too, copy them across with the stack up. The `mc` binary comes from `pgsty/mc`, a
+maintained MinIO fork, because the official images are gone:
+
+```bash
+OLD=$(docker volume ls -q | grep '_objectstorage-data$')   # check that it matches one volume
+NET=$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' posthog-objectstorage | awk '{print $1}')
+S3_USER=posthog; S3_PASS=<MINIO_ROOT_PASSWORD from the env tab>
+
+docker run -d --name legacy-minio --network "$NET" -v "$OLD:/data" \
+  -e MINIO_ROOT_USER="$S3_USER" -e MINIO_ROOT_PASSWORD="$S3_PASS" \
+  pgsty/minio:RELEASE.2026-08-04T00-00-00Z server /data
+sleep 5
+docker run --rm --network "$NET" --entrypoint sh pgsty/mc:RELEASE.2026-09-16T00-00-00Z -c "
+  mc alias set old http://legacy-minio:9000 $S3_USER $S3_PASS &&
+  mc alias set new http://objectstorage:19000 $S3_USER $S3_PASS &&
+  mc mirror --preserve old/posthog new/posthog &&
+  mc mirror --preserve old/ai-blobs new/ai-blobs"
+docker rm -f legacy-minio
+```
+
+Check an old export in the UI, then free the space with `docker volume rm "$OLD"`. The query-cache
+prefix under `posthog/` gets copied as well. It does no harm, and PostHog rebuilds it anyway.
+
 ### Rolling back
 
 Set the tags back and redeploy. **This only works if the new version did not run a destructive
@@ -406,10 +437,12 @@ Every deviation from PostHog's `docker-compose.hobby.yml`, and why:
 | `temporal-ui`, `temporal-admin-tools` dropped | Developer conveniences that also publish host ports |
 | `asyncmigrationscheck` dropped | Upstream sets `deploy.replicas: 0` on it — it never runs |
 | **`capture-ai` added** | Upstream's Caddyfile routes `/i/v0/ai` to a `capture-ai` service that the hobby compose never defines, so LLM-analytics ingestion 502s |
-| All host port publishing removed | Upstream exposes MinIO (19000/19001), SeaweedFS, Temporal (7233) and the Temporal UI (8081) on the host. Nothing outside the compose network needs them |
+| All host port publishing removed | Upstream exposes objectstorage (19000), SeaweedFS, Temporal (7233) and the Temporal UI (8081) on the host. Nothing outside the compose network needs them |
 | `assets` init container replaces the git clone | Upstream clones the PostHog repo to bind-mount UDF binaries, protobuf schemas and a downloaded GeoIP database. Taking them from the app image instead removes the deploy-time network dependency and guarantees they match `POSTHOG_APP_TAG` |
 | ClickHouse XML configs embedded as compose `configs:` | Same reason — no repo checkout on the host |
-| Postgres and MinIO credentials generated | Upstream ships the published defaults `posthog:posthog` and `object_storage_root_user` |
+| Postgres and object storage credentials generated | Upstream ships the published defaults `posthog:posthog` and `object_storage_root_user` |
+| `objectstorage` removes its ready-marker on start | Upstream's healthcheck tests for `/tmp/objectstorage-ready`, which survives a container restart, so after a restart the service reports healthy before SeaweedFS is listening |
+| `GOMEMLIMIT` on `objectstorage` | Upstream sets no memory limit. Under this template's 512M limit, SeaweedFS's Go heap outgrew the container during a 300 MB upload and the service was killed mid-write; with the ceiling it peaks under 400 MiB |
 | Explicit memory limits on every service | On 16 GB, one runaway container takes the box down. Limits also let ClickHouse and the JVMs size themselves off their share instead of the whole host |
 | ClickHouse caches, query budget and thread pools resized | Upstream sets a 5 GiB mark cache, 8 GiB uncompressed cache and a 10 GB per-query budget — sized for a large analytics box, not for sharing 16 GB with 34 other containers |
 | System log tables disabled, `query_log` TTL cut to 3 days | Per-second `metric_log` / `asynchronous_metric_log` rows are the classic way a small ClickHouse disk fills up. `query_log` is kept because it is the one you need when debugging |
@@ -434,6 +467,7 @@ All in `posthog.env`. The most useful ones, in the order you would reach for the
 | Ingestion falls behind | `NODE_HEAP_INGESTION` + `MEM_INGESTION` | `ingestion-general` is the hot path |
 | Redpanda disk grows | `KAFKA_RETENTION_MS`, `KAFKA_RETENTION_BYTES` | Applies to new topics; use `rpk topic alter-config` for existing ones |
 | Image exports time out | `BROWSERLESS_CONCURRENT`, `BROWSERLESS_TIMEOUT` | Chromium is memory-hungry; raise `MEM_BROWSERLESS` too |
+| `objectstorage` restarts during large exports or uploads | `MEM_OBJECTSTORAGE` + `GOMEMLIMIT_OBJECTSTORAGE` | Raise both together and keep the Go ceiling about 100 MB under the container limit |
 
 Moving to a bigger machine: the env file has ready-made blocks for 8 vCPU / 32 GB and
 16 vCPU / 64 GB at the bottom. Uncomment one — the values below it override the CX43 block.
@@ -464,7 +498,7 @@ Nothing in this template backs itself up. What matters, in order:
 | `postgres-data` | Users, projects, dashboards, insights, flags, integrations, Temporal state | Total loss — the events in ClickHouse become unreadable data |
 | `clickhouse-data` | Events, persons, session metadata | All analytics history |
 | `seaweedfs-data` | Session replay blobs | All recordings |
-| `objectstorage-data` | Exports, AI blobs | Exported files |
+| `objectstorage-seaweedfs-data` | Exports, AI blobs | Exported files |
 
 `redpanda-data`, `redis7-data`, `caddy-*` and the ZooKeeper volumes are reconstructible.
 

@@ -124,7 +124,10 @@ services:
         max-file: "5"
 
   electric:
-    image: "electricsql/electric:1.4.4"
+    # Overridable because electricsql/electric vanished from Docker Hub on 2026-09-28
+    # (electric-sql/electric#4822). The env template sets ELECTRIC_IMAGE to Electric's interim
+    # repository; a deployment that leaves it unset keeps running the image it already has.
+    image: "${ELECTRIC_IMAGE:-electricsql/electric:1.4.4}"
     container_name: ${CONTAINER_PREFIX}-electric
     restart: unless-stopped
     depends_on:
@@ -251,8 +254,11 @@ services:
         max-size: "50m"
         max-file: "5"
 
+  # MinIO pulled its images from Docker Hub and Quay in September 2026. pgsty/minio is the
+  # maintained community fork: same env vars, same on-disk format, so the existing
+  # minio-data volume is read as-is.
   minio:
-    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    image: pgsty/minio:RELEASE.2026-08-04T00-00-00Z
     container_name: ${CONTAINER_PREFIX}-minio
     restart: unless-stopped
     ports:
@@ -278,7 +284,7 @@ services:
         max-file: "5"
 
   minio-init:
-    image: minio/mc:latest
+    image: pgsty/mc:RELEASE.2026-09-16T00-00-00Z
     container_name: ${CONTAINER_PREFIX}-minio-init
     depends_on:
       minio:

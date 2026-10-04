@@ -2,6 +2,36 @@
 
 Deploy Trigger.dev v4.5.8 with databases on a dedicated Dokploy remote server, the webapp as a Dokploy Stack (Docker Swarm with replicas), and multiple workers on Dokploy remote servers.
 
+## MinIO Image Change (September 2026)
+
+MinIO removed `minio/minio` and `minio/mc` from Docker Hub and Quay in September 2026, so a
+fresh deploy of the old DB compose fails with `pull access denied`. Servers that already have
+the image cached keep running until the image is removed or the server is rebuilt. The DB compose
+now uses `pgsty/minio` and `pgsty/mc`, a maintained community fork with the same environment
+variables and on-disk format.
+
+For an existing deployment, paste the new DB compose and redeploy. No env changes are needed,
+and the `minio-data` volume is reused as-is. The webapp compose does not change.
+
+## ElectricSQL Image (September 2026)
+
+The `electricsql/electric` repository has been missing from Docker Hub since 2026-09-28
+([electric-sql/electric#4822](https://github.com/electric-sql/electric/issues/4822)), so the
+pinned `electricsql/electric:1.4.4` cannot be pulled by a server that does not already have it.
+Electric publishes to `electricsql/electric-temp` until Docker restores the original, and that
+repository only carries `1.8.1`.
+
+The DB compose reads the image from `ELECTRIC_IMAGE` and falls back to the old pin:
+
+- **New deployment:** `trigger-dbs.env` already sets
+  `ELECTRIC_IMAGE=electricsql/electric-temp:1.8.1`. Leave it in place.
+- **Existing deployment:** nothing to do. With `ELECTRIC_IMAGE` unset the compose keeps
+  `electricsql/electric:1.4.4`, which the server already has. If that image was removed
+  (`docker image prune`, a rebuilt server), add the line above to the env tab.
+
+Electric keeps no volume, so changing its version needs no migration. Delete the `ELECTRIC_IMAGE`
+line once `electricsql/electric` is back.
+
 ## Upgrade an Existing v4.5.1 Deployment to v4.5.8
 
 These templates pin both the webapp and supervisor images to `v4.5.8`. Review the
