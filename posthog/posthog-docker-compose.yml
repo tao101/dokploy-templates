@@ -1744,6 +1744,9 @@ services:
     environment:
       OBJECTSTORAGE_ACCESS_KEY: "${MINIO_ROOT_USER}"
       OBJECTSTORAGE_SECRET_KEY: "${MINIO_ROOT_PASSWORD}"
+      # Go does not see the container memory limit. Without this ceiling a burst of uploads
+      # grows the heap past MEM_OBJECTSTORAGE and the kernel kills the service mid-write.
+      GOMEMLIMIT: "${GOMEMLIMIT_OBJECTSTORAGE:-400MiB}"
     command: ["server", "-master.port=19001", "-s3", "-s3.port=19000", "-dir=/data", "-volume.max=1000", "-master.volumePreallocate=false"]
     volumes:
       # A new volume: SeaweedFS cannot read MinIO's layout. The old objects stay on the

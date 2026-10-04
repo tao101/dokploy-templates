@@ -442,6 +442,7 @@ Every deviation from PostHog's `docker-compose.hobby.yml`, and why:
 | ClickHouse XML configs embedded as compose `configs:` | Same reason — no repo checkout on the host |
 | Postgres and object storage credentials generated | Upstream ships the published defaults `posthog:posthog` and `object_storage_root_user` |
 | `objectstorage` removes its ready-marker on start | Upstream's healthcheck tests for `/tmp/objectstorage-ready`, which survives a container restart, so after a restart the service reports healthy before SeaweedFS is listening |
+| `GOMEMLIMIT` on `objectstorage` | Upstream sets no memory limit. Under this template's 512M limit, SeaweedFS's Go heap outgrew the container during a 300 MB upload and the service was killed mid-write; with the ceiling it peaks under 400 MiB |
 | Explicit memory limits on every service | On 16 GB, one runaway container takes the box down. Limits also let ClickHouse and the JVMs size themselves off their share instead of the whole host |
 | ClickHouse caches, query budget and thread pools resized | Upstream sets a 5 GiB mark cache, 8 GiB uncompressed cache and a 10 GB per-query budget — sized for a large analytics box, not for sharing 16 GB with 34 other containers |
 | System log tables disabled, `query_log` TTL cut to 3 days | Per-second `metric_log` / `asynchronous_metric_log` rows are the classic way a small ClickHouse disk fills up. `query_log` is kept because it is the one you need when debugging |
@@ -466,6 +467,7 @@ All in `posthog.env`. The most useful ones, in the order you would reach for the
 | Ingestion falls behind | `NODE_HEAP_INGESTION` + `MEM_INGESTION` | `ingestion-general` is the hot path |
 | Redpanda disk grows | `KAFKA_RETENTION_MS`, `KAFKA_RETENTION_BYTES` | Applies to new topics; use `rpk topic alter-config` for existing ones |
 | Image exports time out | `BROWSERLESS_CONCURRENT`, `BROWSERLESS_TIMEOUT` | Chromium is memory-hungry; raise `MEM_BROWSERLESS` too |
+| `objectstorage` restarts during large exports or uploads | `MEM_OBJECTSTORAGE` + `GOMEMLIMIT_OBJECTSTORAGE` | Raise both together and keep the Go ceiling about 100 MB under the container limit |
 
 Moving to a bigger machine: the env file has ready-made blocks for 8 vCPU / 32 GB and
 16 vCPU / 64 GB at the bottom. Uncomment one — the values below it override the CX43 block.
